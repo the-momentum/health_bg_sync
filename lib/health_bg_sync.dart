@@ -17,6 +17,7 @@ class HealthBgSync {
     required String token,
     required List<HealthDataType> types,
     int chunkSize = 1000, // Default chunk size to prevent HTTP 413 errors
+    int recordsPerChunk = 10000, // Default records per HTTP request to prevent timeouts (~2-3MB per chunk)
   }) async {
     // Touch the registration so it's tree-shake-proof.
     assert(_hbgsRegistered, 'MethodChannel not registered');
@@ -25,6 +26,7 @@ class HealthBgSync {
       'token': token,
       'types': types.map((e) => e.id).toList(growable: false),
       'chunkSize': chunkSize,
+      'recordsPerChunk': recordsPerChunk,
     });
   }
 

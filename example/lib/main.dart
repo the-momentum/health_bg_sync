@@ -5,13 +5,12 @@ import 'package:health_bg_sync/health_data_type.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await HealthBgSync.initialize(
-    endpoint: 'https://testmomentumex.requestcatcher.com/test',
+    endpoint: 'https://catchmomentum.requestcatcher.com/health',
     token: 'JWT_TOKEN',
     types: HealthDataType.values,
     chunkSize: 10000,
   );
-  print('WTFF');
-  final ok = await HealthBgSync.requestAuthorization();
+  await HealthBgSync.requestAuthorization();
 
   runApp(const MyApp());
 }

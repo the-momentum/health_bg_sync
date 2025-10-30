@@ -12,41 +12,22 @@ extension HealthBgSyncPlugin {
 
         for type in trackedTypes {
             let observer = HKObserverQuery(sampleType: type, predicate: nil) { [weak self] _, completionHandler, error in
-                guard let self = self else { return }
-                
-                // Start background task with timeout
-                var bgTask: UIBackgroundTaskIdentifier = .invalid
-                bgTask = UIApplication.shared.beginBackgroundTask(withName: "health_observer_sync") {
-                    print("⚠️ Background task expired for \(type.identifier)")
-                    UIApplication.shared.endBackgroundTask(bgTask)
-                    bgTask = .invalid
-                }
-
-                // Set a timeout to prevent long-running background tasks
-                let timeoutTimer = DispatchWorkItem {
-                    print("⚠️ Background sync timeout for \(type.identifier)")
+                guard let self = self else { 
                     completionHandler()
-                    if bgTask != .invalid { 
-                        UIApplication.shared.endBackgroundTask(bgTask)
-                        bgTask = .invalid
-                    }
+                    return 
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: timeoutTimer)
 
                 if let error = error {
                     print("⚠️ Observer error for \(type.identifier): \(error.localizedDescription)")
-                    timeoutTimer.cancel()
                     completionHandler()
-                    if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
                     return
                 }
 
-                // Use background-optimized sync for observer queries
-                self.syncTypeBackground(type, fullExport: false) {
-                    timeoutTimer.cancel()
-                    completionHandler()
-                    if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
-                }
+                // Trigger debounced combined sync - all types will be collected and sent together in one request
+                // This debounces multiple observer triggers and sends all changes together
+                self.triggerCombinedSync()
+                
+                completionHandler()
             }
             healthStore.execute(observer)
             activeObserverQueries.append(observer)

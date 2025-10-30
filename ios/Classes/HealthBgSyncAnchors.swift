@@ -45,13 +45,13 @@ extension HealthBgSyncPlugin {
         let fullDone = defaults.bool(forKey: fullDoneKey())
         if fullDone {
             // Endpoint already completed full export → do incremental only
+            print("✅ Full export already done, performing incremental sync only")
             syncAll(fullExport: false, completion: completion)
         } else {
             // First time for this endpoint → perform full export
-            syncAll(fullExport: true) {
-                self.defaults.set(true, forKey: self.fullDoneKey())
-                completion()
-            }
+            // Note: fullDone will be marked true AFTER successful upload (in URLSessionDelegate)
+            print("🔄 First time sync for this endpoint, performing full export")
+            syncAll(fullExport: true, completion: completion)
         }
     }
 }
