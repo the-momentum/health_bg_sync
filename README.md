@@ -89,7 +89,7 @@ A Flutter plugin for secure background health data synchronization from Apple He
 
 7. **Health data syncs using accessToken**
    ```http
-   POST https://api.openwearables.com/sdk/users/{userId}/sync/apple/healthkit
+   POST https://api.openwearables.com/sdk/users/{userId}/sync/apple/healthion
    Authorization: at_...
    ```
 

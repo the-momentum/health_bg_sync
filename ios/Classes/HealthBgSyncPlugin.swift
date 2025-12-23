@@ -67,7 +67,7 @@ public class HealthBgSyncPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, 
         
         // Default endpoint
         guard let baseUrl = baseUrl else { return nil }
-        return URL(string: "\(baseUrl)/sdk/users/\(userId)/sync/apple/healthkit")
+        return URL(string: "\(baseUrl)/sdk/users/\(userId)/sync/apple/healthion")
     }
 
     // MARK: - Flutter registration

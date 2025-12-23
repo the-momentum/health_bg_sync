@@ -72,7 +72,7 @@ class HealthBgSync {
   /// - [customSyncUrl]: Optional custom URL for syncing health data.
   ///   Use this for local testing. The URL can include `{user_id}` or `{userId}`
   ///   placeholder which will be replaced with the signed-in user's ID.
-  ///   Example: `http://localhost:3000/sdk/users/{user_id}/sync/apple/healthkit`
+  ///   Example: `http://localhost:3000/sdk/users/{user_id}/sync/apple/healthion`
   ///
   /// ```dart
   /// await HealthBgSync.configure(
@@ -81,7 +81,7 @@ class HealthBgSync {
   ///
   /// // Or with custom URL for local testing:
   /// await HealthBgSync.configure(
-  ///   customSyncUrl: 'http://localhost:3000/sdk/users/{user_id}/sync/apple/healthkit',
+  ///   customSyncUrl: 'http://localhost:3000/sdk/users/{user_id}/sync/apple/healthion',
   /// );
   ///
   /// // Check if session was restored
