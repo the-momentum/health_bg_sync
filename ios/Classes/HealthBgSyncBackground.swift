@@ -23,33 +23,37 @@ extension HealthBgSyncPlugin {
                     return
                 }
 
-                // Trigger debounced combined sync - all types will be collected and sent together in one request
-                // This debounces multiple observer triggers and sends all changes together
                 self.triggerCombinedSync()
-                
                 completionHandler()
             }
             healthStore.execute(observer)
             activeObserverQueries.append(observer)
             healthStore.enableBackgroundDelivery(for: type, frequency: .immediate) { _, _ in }
         }
-        print("📡 Background observers registered for \(trackedTypes.count) types")
+        logMessage("📡 Background observers registered for \(trackedTypes.count) types")
     }
 
     internal func stopBackgroundDelivery() {
         for q in activeObserverQueries { healthStore.stop(q) }
         activeObserverQueries.removeAll()
-        for t in trackedTypes { healthStore.disableBackgroundDelivery(for: t) {_,_ in} }
+        for t in trackedTypes { 
+            healthStore.disableBackgroundDelivery(for: t) { _, _ in } 
+        }
+        logMessage("🔌 Background observers stopped")
     }
 
-    // MARK: - BGTaskScheduler (fallback catch-up)
+    // MARK: - BGTaskScheduler
     internal func scheduleAppRefresh() {
         guard #available(iOS 13.0, *) else { return }
         let req = BGAppRefreshTaskRequest(identifier: refreshTaskId)
-        // Earliest in ~15 minutes (iOS decides the actual time)
         req.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
-        do { try BGTaskScheduler.shared.submit(req) }
-        catch { print("⚠️ scheduleAppRefresh error: \(error.localizedDescription)") }
+        do { 
+            try BGTaskScheduler.shared.submit(req) 
+            logMessage("📅 Scheduled app refresh task")
+        }
+        catch { 
+            logMessage("⚠️ scheduleAppRefresh error: \(error.localizedDescription)") 
+        }
     }
 
     internal func scheduleProcessing() {
@@ -57,24 +61,28 @@ extension HealthBgSyncPlugin {
         let req = BGProcessingTaskRequest(identifier: processTaskId)
         req.requiresNetworkConnectivity = true
         req.requiresExternalPower = false
-        do { try BGTaskScheduler.shared.submit(req) }
-        catch { print("⚠️ scheduleProcessing error: \(error.localizedDescription)") }
+        do { 
+            try BGTaskScheduler.shared.submit(req) 
+            logMessage("📅 Scheduled processing task")
+        }
+        catch { 
+            logMessage("⚠️ scheduleProcessing error: \(error.localizedDescription)") 
+        }
     }
 
     internal func cancelAllBGTasks() {
         if #available(iOS 13.0, *) {
             BGTaskScheduler.shared.cancelAllTaskRequests()
+            logMessage("🚫 Cancelled all background tasks")
         }
     }
 
     @available(iOS 13.0, *)
     internal func handleAppRefresh(task: BGAppRefreshTask) {
-        // Always reschedule
         scheduleAppRefresh()
 
         let opQueue = OperationQueue()
         let op = BlockOperation { [weak self] in
-            // Use background-optimized sync for BGAppRefresh
             let group = DispatchGroup()
             group.enter()
             
@@ -82,15 +90,14 @@ extension HealthBgSyncPlugin {
                 group.leave()
             }
             
-            // Wait with timeout
             let result = group.wait(timeout: .now() + 20)
             if result == .timedOut {
-                print("⚠️ BGAppRefresh sync timed out")
+                self?.logMessage("⚠️ BGAppRefresh sync timed out")
             }
         }
 
         task.expirationHandler = { 
-            print("⚠️ BGAppRefresh task expired")
+            self.logMessage("⚠️ BGAppRefresh task expired")
             op.cancel() 
         }
         op.completionBlock = { task.setTaskCompleted(success: !op.isCancelled) }
@@ -99,12 +106,10 @@ extension HealthBgSyncPlugin {
 
     @available(iOS 13.0, *)
     internal func handleProcessing(task: BGProcessingTask) {
-        // Always reschedule
         scheduleProcessing()
 
         let opQueue = OperationQueue()
         let op = BlockOperation { [weak self] in
-            // Use background-optimized sync for BGProcessing
             let group = DispatchGroup()
             group.enter()
             
@@ -113,15 +118,14 @@ extension HealthBgSyncPlugin {
                 group.leave()
             }
             
-            // Wait with timeout
             let result = group.wait(timeout: .now() + 25)
             if result == .timedOut {
-                print("⚠️ BGProcessing sync timed out")
+                self?.logMessage("⚠️ BGProcessing sync timed out")
             }
         }
 
         task.expirationHandler = { 
-            print("⚠️ BGProcessing task expired")
+            self.logMessage("⚠️ BGProcessing task expired")
             op.cancel() 
         }
         op.completionBlock = { task.setTaskCompleted(success: !op.isCancelled) }

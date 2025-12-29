@@ -6,7 +6,7 @@ extension HealthBgSyncPlugin {
     // MARK: - Outbox model
     internal struct OutboxItem: Codable {
         let typeIdentifier: String
-        let endpointKey: String
+        let userKey: String
         let payloadPath: String
         let anchorPath: String?
         let wasFullExport: Bool?
@@ -35,13 +35,19 @@ extension HealthBgSyncPlugin {
         token: String,
         completion: @escaping ()->Void
     ) {
-        // 1) payload → file
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { completion(); return }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { 
+            completion()
+            return 
+        }
         let id = UUID().uuidString
         let payloadURL = newPath("payload_\(id)", ext: "json")
-        do { try data.write(to: payloadURL, options: Data.WritingOptions.atomic) } catch { completion(); return }
+        do { 
+            try data.write(to: payloadURL, options: Data.WritingOptions.atomic) 
+        } catch { 
+            completion()
+            return 
+        }
 
-        // 2) candidate anchor → file (optional)
         var anchorURL: URL? = nil
         if let cand = candidateAnchor,
            let ad = try? NSKeyedArchiver.archivedData(withRootObject: cand, requiringSecureCoding: true) {
@@ -50,24 +56,23 @@ extension HealthBgSyncPlugin {
             anchorURL = u
         }
 
-        // 3) manifest (item) → file
         let item = OutboxItem(
             typeIdentifier: type.identifier,
-            endpointKey: endpointKey(),
+            userKey: userKey(),
             payloadPath: payloadURL.path,
             anchorPath: anchorURL?.path,
             wasFullExport: nil
         )
         let itemURL = newPath("item_\(id)", ext: "json")
-        if let md = try? JSONEncoder().encode(item) { try? md.write(to: itemURL, options: Data.WritingOptions.atomic) }
+        if let md = try? JSONEncoder().encode(item) { 
+            try? md.write(to: itemURL, options: Data.WritingOptions.atomic) 
+        }
 
-        // 4) request
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(token, forHTTPHeaderField: "Authorization")
 
-        // 5) background upload (from file)
         let task = session.uploadTask(with: req, fromFile: payloadURL)
         task.taskDescription = [itemURL.path, payloadURL.path, anchorURL?.path ?? ""].joined(separator: "|")
         task.resume()
@@ -75,7 +80,7 @@ extension HealthBgSyncPlugin {
         completion()
     }
     
-    // MARK: - Combined upload for all data types
+    // MARK: - Combined upload
     internal func enqueueCombinedUpload(
         payload: [String: Any],
         anchors: [String: HKQueryAnchor],
@@ -84,30 +89,27 @@ extension HealthBgSyncPlugin {
         wasFullExport: Bool = false,
         completion: @escaping (Bool)->Void
     ) {
-        // 1) payload → file
-                guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
-                    self.logMessage("❌ Failed to serialize payload to JSON")
-                    completion(false)
-                    return
-                }
-                
-                let id = UUID().uuidString
-                let payloadURL = newPath("combined_payload_\(id)", ext: "json")
-                
-                do {
-                    try data.write(to: payloadURL, options: Data.WritingOptions.atomic)
-                    let fileSizeMB = Double(data.count) / (1024 * 1024)
-                    self.logMessage("✅ Created payload file: \(String(format: "%.2f", fileSizeMB)) MB (\(data.count) bytes)")
-                } catch {
-                    self.logMessage("❌ Failed to write payload file: \(error.localizedDescription)")
-                    completion(false)
-                    return
-                }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            self.logMessage("❌ Failed to serialize payload")
+            completion(false)
+            return
+        }
+        
+        let id = UUID().uuidString
+        let payloadURL = newPath("combined_payload_\(id)", ext: "json")
+        
+        do {
+            try data.write(to: payloadURL, options: Data.WritingOptions.atomic)
+            let fileSizeMB = Double(data.count) / (1024 * 1024)
+            self.logMessage("✅ Payload: \(String(format: "%.2f", fileSizeMB)) MB")
+        } catch {
+            self.logMessage("❌ Failed to write payload: \(error.localizedDescription)")
+            completion(false)
+            return
+        }
 
-        // 2) anchors → file (for all types) - serialize as binary data
         var anchorsURL: URL? = nil
         if !anchors.isEmpty {
-            // Create a dictionary to store anchor data
             var anchorsData: [String: Data] = [:]
             for (typeId, anchor) in anchors {
                 if let data = try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true) {
@@ -115,7 +117,6 @@ extension HealthBgSyncPlugin {
                 }
             }
             
-            // Serialize the dictionary as binary data
             if let serializedData = try? NSKeyedArchiver.archivedData(withRootObject: anchorsData, requiringSecureCoding: true) {
                 let u = newPath("combined_anchors_\(id)", ext: "bin")
                 try? serializedData.write(to: u, options: Data.WritingOptions.atomic)
@@ -123,145 +124,119 @@ extension HealthBgSyncPlugin {
             }
         }
 
-        // 3) manifest (item) → file
         let item = OutboxItem(
-            typeIdentifier: "combined", // Special identifier for combined data
-            endpointKey: endpointKey(),
+            typeIdentifier: "combined",
+            userKey: userKey(),
             payloadPath: payloadURL.path,
             anchorPath: anchorsURL?.path,
             wasFullExport: wasFullExport
         )
         let itemURL = newPath("combined_item_\(id)", ext: "json")
-        if let md = try? JSONEncoder().encode(item) { try? md.write(to: itemURL, options: Data.WritingOptions.atomic) }
+        if let md = try? JSONEncoder().encode(item) { 
+            try? md.write(to: itemURL, options: Data.WritingOptions.atomic) 
+        }
 
-                // 4) Read file into memory for immediate upload
-                guard let payloadData = try? Data(contentsOf: payloadURL) else {
-                    self.logMessage("❌ Failed to read payload file")
-                    completion(false)
-                    return
-                }
-                
-                // 5) Create request with data as body for immediate upload
-                var req = URLRequest(url: endpoint)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                req.httpBody = payloadData
-                req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
-                
-                self.logMessage("📤 Starting immediate upload to \(endpoint.absoluteString) (payload: \(payloadData.count) bytes)")
+        guard let payloadData = try? Data(contentsOf: payloadURL) else {
+            self.logMessage("❌ Failed to read payload")
+            completion(false)
+            return
+        }
         
-        // Use dataTask for immediate execution with completion handler
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(token, forHTTPHeaderField: "Authorization")
+        req.httpBody = payloadData
+        req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
+        
+        self.logMessage("📤 Uploading to \(endpoint.absoluteString)")
+        
         let task = foregroundSession.dataTask(with: req) { [weak self] data, response, error in
             guard let self = self else { return }
             
-                    // Handle response
-                    if let error = error {
-                        let nsError = error as NSError
-                        if nsError.code != NSURLErrorCancelled {
-                            self.logMessage("❌ Upload error: \(error.localizedDescription)")
-                        } else {
-                            self.logMessage("ℹ️ Upload was cancelled")
-                        }
-                // Clean up on error
+            if let error = error {
+                let nsError = error as NSError
+                if nsError.code != NSURLErrorCancelled {
+                    self.logMessage("❌ Upload error: \(error.localizedDescription)")
+                }
                 try? FileManager.default.removeItem(atPath: payloadURL.path)
                 completion(false)
                 return
             }
             
-                    if let httpResponse = response as? HTTPURLResponse {
-                        self.logMessage("📥 HTTP Response: \(httpResponse.statusCode) for \(endpoint.absoluteString)")
-                        
-                        if (200...299).contains(httpResponse.statusCode) {
-                            self.logMessage("✅ Upload successful (HTTP \(httpResponse.statusCode))")
+            if let httpResponse = response as? HTTPURLResponse {
+                self.logMessage("📥 Response: HTTP \(httpResponse.statusCode)")
+                
+                if (200...299).contains(httpResponse.statusCode) {
+                    self.logMessage("✅ Upload successful")
                     
-                    // Save anchors after successful upload (only on last chunk)
                     self.handleSuccessfulUpload(itemPath: itemURL.path, anchorPath: anchorsURL?.path, wasFullExport: wasFullExport)
                     
-                    // Clean up payload file
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
-                    
-                    // Notify success
                     completion(true)
                 } else {
-                    print("⛔️ Upload failed with HTTP \(httpResponse.statusCode)")
                     if let data = data, let responseString = String(data: data, encoding: .utf8) {
-                        print("⛔️ Server response: \(String(responseString.prefix(200)))")
+                        self.logMessage("⛔️ Upload failed: \(String(responseString.prefix(200)))")
                     }
-                    // Clean up on failure
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                     completion(false)
                 }
             } else {
-                print("⚠️ No HTTP response received")
+                self.logMessage("⚠️ No HTTP response")
                 try? FileManager.default.removeItem(atPath: payloadURL.path)
                 completion(false)
             }
         }
         
         task.resume()
-        print("✅ Upload task resumed, task ID: \(task.taskIdentifier)")
-        
-        // Note: completion will be called from the dataTask completion handler
     }
     
     // MARK: - Handle successful upload
     internal func handleSuccessfulUpload(itemPath: String, anchorPath: String?, wasFullExport: Bool) {
-        // Load item to get endpoint key
         guard let itemData = try? Data(contentsOf: URL(fileURLWithPath: itemPath)),
               let item = try? JSONDecoder().decode(OutboxItem.self, from: itemData) else {
-            print("⚠️ Failed to read item file for anchor saving")
+            logMessage("⚠️ Failed to read item for anchor saving")
             return
         }
         
-        // Save anchors if available
         if let anchorPath = anchorPath, !anchorPath.isEmpty {
             if item.typeIdentifier == "combined" {
-                // For combined uploads, save all anchors
                 if let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)),
                    let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSDictionary.self, from: anchorData) as? [String: Data] {
                     for (typeId, anchorData) in anchorsDict {
-                        saveAnchorData(anchorData, typeIdentifier: typeId, endpointKey: item.endpointKey)
+                        saveAnchorData(anchorData, typeIdentifier: typeId, userKey: item.userKey)
                     }
-                    print("✅ Saved anchors for \(anchorsDict.count) types after successful upload")
+                    logMessage("✅ Saved anchors for \(anchorsDict.count) types")
                 }
             } else {
-                // For single type uploads, save single anchor
                 if let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)) {
-                    saveAnchorData(anchorData, typeIdentifier: item.typeIdentifier, endpointKey: item.endpointKey)
+                    saveAnchorData(anchorData, typeIdentifier: item.typeIdentifier, userKey: item.userKey)
                 }
             }
             
-            // Clean up anchor file
             try? FileManager.default.removeItem(atPath: anchorPath)
         }
         
-        // Mark full export as done if this was a full export
         if wasFullExport {
-            let fullDoneKey = "fullDone.\(item.endpointKey)"
-            let defaults = UserDefaults(suiteName: "com.healthbgsync.state") ?? .standard
+            let fullDoneKey = "fullDone.\(item.userKey)"
             defaults.set(true, forKey: fullDoneKey)
             defaults.synchronize()
-            print("✅ Marked full export as complete for endpoint: \(item.endpointKey)")
+            logMessage("✅ Marked full export complete")
         }
         
-        // Clean up item file
         try? FileManager.default.removeItem(atPath: itemPath)
     }
 
-    // Retry pending items after startup (when endpoint/token are available)
+    // MARK: - Retry pending items
     internal func retryOutboxIfPossible() {
-        guard let endpoint = self.endpoint, let token = self.token else { return }
+        guard let endpoint = self.syncEndpoint, let token = self.accessToken else { return }
         let dir = outboxDir()
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         
-        // Handle both regular and combined items
         let regularItems = files.filter { $0.lastPathComponent.hasPrefix("item_") && $0.pathExtension == "json" && !$0.lastPathComponent.hasPrefix("combined_item_") }
         let combinedItems = files.filter { $0.lastPathComponent.hasPrefix("combined_item_") && $0.pathExtension == "json" }
 
-        // Retry regular items
         for itemURL in regularItems {
-            // Skip very recent items to avoid duplicating in-flight uploads
             if let attrs = try? FileManager.default.attributesOfItem(atPath: itemURL.path),
                let mdate = attrs[.modificationDate] as? Date,
                Date().timeIntervalSince(mdate) < 30 {
@@ -270,23 +245,18 @@ extension HealthBgSyncPlugin {
             guard let data = try? Data(contentsOf: itemURL),
                   let item = try? JSONDecoder().decode(OutboxItem.self, from: data) else { continue }
             let payloadURL = URL(fileURLWithPath: item.payloadPath)
-            guard FileManager.default.fileExists(atPath: payloadURL.path) else { continue }
-
-            guard let payloadData = try? Data(contentsOf: payloadURL) else { continue }
+            guard FileManager.default.fileExists(atPath: payloadURL.path),
+                  let payloadData = try? Data(contentsOf: payloadURL) else { continue }
             
             var req = URLRequest(url: endpoint)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue(token, forHTTPHeaderField: "Authorization")
             req.httpBody = payloadData
             req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
 
             let task = foregroundSession.dataTask(with: req) { data, response, error in
                 if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                    // Save anchors and clean up on success
-                    if let anchorPath = item.anchorPath, !anchorPath.isEmpty {
-                        // Save anchor logic here if needed for retries
-                    }
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                     try? FileManager.default.removeItem(atPath: itemURL.path)
                 }
@@ -294,9 +264,7 @@ extension HealthBgSyncPlugin {
             task.resume()
         }
         
-        // Retry combined items
         for itemURL in combinedItems {
-            // Skip very recent items to avoid duplicating in-flight uploads
             if let attrs = try? FileManager.default.attributesOfItem(atPath: itemURL.path),
                let mdate = attrs[.modificationDate] as? Date,
                Date().timeIntervalSince(mdate) < 30 {
@@ -311,13 +279,12 @@ extension HealthBgSyncPlugin {
             var req = URLRequest(url: endpoint)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue(token, forHTTPHeaderField: "Authorization")
             req.httpBody = payloadData
             req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
 
             let task = foregroundSession.dataTask(with: req) { data, response, error in
                 if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                    // Handle successful retry - save anchors and clean up
                     self.handleSuccessfulUpload(itemPath: itemURL.path, anchorPath: item.anchorPath, wasFullExport: item.wasFullExport ?? false)
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                 }

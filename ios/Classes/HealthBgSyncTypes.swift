@@ -47,11 +47,13 @@ extension HealthBgSyncPlugin {
     
     // MARK: - Combined serialization for all data types
     internal func serializeCombined(samples: [HKSample], anchors: [String: HKQueryAnchor]) -> [String: Any] {
+        var workouts: [[String: Any]] = []
         var records: [[String: Any]] = []
         
         for s in samples {
             if let w = s as? HKWorkout {
-                records.append(_mapWorkout(w))
+                // Separate workouts into their own array
+                workouts.append(_mapWorkout(w))
             } else if let q = s as? HKQuantitySample {
                 records.append(_mapQuantity(q))
             } else if let c = s as? HKCategorySample {
@@ -76,6 +78,7 @@ extension HealthBgSyncPlugin {
         
         return [
             "data": [
+                "workouts": workouts,
                 "records": records
             ]
         ]

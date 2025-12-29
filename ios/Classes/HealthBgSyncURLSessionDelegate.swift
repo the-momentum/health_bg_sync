@@ -60,24 +60,24 @@ extension HealthBgSyncPlugin {
                    let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)),
                    let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSDictionary.self, from: anchorData) as? [String: Data] {
                     for (typeId, anchorData) in anchorsDict {
-                        saveAnchorData(anchorData, typeIdentifier: typeId, endpointKey: item.endpointKey)
+                        saveAnchorData(anchorData, typeIdentifier: typeId, userKey: item.userKey)
                     }
                     print("✅ Saved anchors for \(anchorsDict.count) types after successful upload")
                 }
                 
                 // Mark full export as done if this was a full export
                 if item.wasFullExport == true {
-                    let fullDoneKey = "fullDone.\(item.endpointKey)"
+                    let fullDoneKey = "fullDone.\(item.userKey)"
                     let defaults = UserDefaults(suiteName: "com.healthbgsync.state") ?? .standard
                     defaults.set(true, forKey: fullDoneKey)
                     defaults.synchronize()
-                    print("✅ Marked full export as complete for endpoint: \(item.endpointKey)")
+                    print("✅ Marked full export as complete for user: \(item.userKey)")
                 }
             } else {
                 // For single type uploads, save single anchor
                 if !anchorPath.isEmpty,
                    let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)) {
-                    saveAnchorData(anchorData, typeIdentifier: item.typeIdentifier, endpointKey: item.endpointKey)
+                    saveAnchorData(anchorData, typeIdentifier: item.typeIdentifier, userKey: item.userKey)
                 }
             }
             if !anchorPath.isEmpty {

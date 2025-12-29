@@ -1,44 +1,121 @@
-# health_bg_sync
+# HealthBgSync (Open Wearables SDK)
 
-A Flutter plugin for syncing HealthKit data from iOS devices to your backend server, with support for background sync and incremental updates.
+A Flutter plugin for secure background health data synchronization from Apple HealthKit (iOS) and Health Connect (Android) to the Open Wearables platform.
 
 ## Features
 
-- ✅ Automatic background synchronization of HealthKit data
-- ✅ Incremental sync using HealthKit anchors (only new/changed data)
-- ✅ Full export on first sync
-- ✅ Chunked uploads to prevent timeouts and HTTP 413 errors
-- ✅ Background delivery when health data changes
-- ✅ Configurable chunk sizes for optimal performance
-- ✅ Supports all HealthKit sample types (quantities, categories, workouts, correlations)
+- 🔐 **Simple Token Authentication** - Backend generates accessToken, SDK uses it directly
+- 📱 **Background Sync** - Health data syncs even when app is in background
+- 📦 **Incremental Updates** - Only syncs new data using anchored queries
+- 💾 **Secure Storage** - Credentials stored in iOS Keychain / Android Keystore
+- 📊 **Wide Data Support** - Steps, heart rate, workouts, sleep, and more
+
+---
+
+## Authentication Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SECURE ZONE                                     │
+│                         (Server-to-Server, HTTPS)                           │
+│                                                                             │
+│  ┌──────────────────┐                      ┌─────────────────┐             │
+│  │  Your Backend    │   Generate Token     │  Open Wearables │             │
+│  │                  │   (with API Key)     │  Platform       │             │
+│  │  [API Key here]  │─────────────────────>│                 │             │
+│  │                  │                      │                 │             │
+│  │                  │<─────────────────────│                 │             │
+│  │                  │   { accessToken,     │                 │             │
+│  │                  │     userId }         │                 │             │
+│  └────────┬─────────┘                      └────────┬────────┘             │
+│           │                                         │                       │
+└───────────│─────────────────────────────────────────│───────────────────────┘
+            │                                         │
+            │ userId + accessToken                    │
+            │ (NO API Key!)                          │
+            ▼                                         │
+┌───────────────────────┐                            │
+│  Mobile App           │                            │
+│  (Flutter SDK)        │   Health data sync         │
+│                       │───────────────────────────>│
+│  [Keychain storage]   │   (Bearer accessToken)     │
+└───────────────────────┘                            │
+```
+
+### Step-by-Step Flow
+
+1. **User logs into your app** (your own authentication)
+
+2. **Mobile app requests credentials from YOUR backend**
+   ```
+   POST /api/health/connect
+   Authorization: Bearer <your-user-jwt>
+   ```
+
+3. **Your backend generates credentials** (server-to-server with API Key)
+   ```http
+   POST https://api.openwearables.com/v1/tokens
+   X-API-Key: sk_live_your_secret_key
+   Content-Type: application/json
+   
+   { "externalId": "user-123" }
+   ```
+   
+   Response:
+   ```json
+   { 
+     "userId": "usr_abc123",
+     "accessToken": "at_..." 
+   }
+   ```
+
+4. **Your backend returns credentials to mobile app**
+   ```json
+   { 
+     "userId": "usr_abc123",
+     "accessToken": "at_..." 
+   }
+   ```
+
+5. **Mobile app signs in with the SDK**
+   ```dart
+   final user = await HealthBgSync.signIn(
+     userId: response['userId'],
+     accessToken: response['accessToken'],
+   );
+   ```
+
+6. **SDK stores credentials securely** in iOS Keychain / Android Keystore
+
+7. **Health data syncs using accessToken**
+   ```http
+   POST https://api.openwearables.com/sdk/users/{userId}/sync/apple/healthion
+   Authorization: at_...
+   ```
+
+---
 
 ## Installation
 
-Add this to your `pubspec.yaml`:
+### 1. Add Dependency
 
 ```yaml
 dependencies:
-  health_bg_sync: ^1.0.0
+  health_bg_sync: ^0.1.0
 ```
 
-Then run:
+### 2. iOS Configuration
 
-```bash
-flutter pub get
-```
-
-## iOS Setup
-
-### 1. Add Background Modes
-
-In your `ios/Runner/Info.plist`, add:
+Add to `Info.plist`:
 
 ```xml
+<key>NSHealthShareUsageDescription</key>
+<string>This app syncs your health data to your account.</string>
+
 <key>UIBackgroundModes</key>
 <array>
-    <string>background-processing</string>
-    <string>background-fetch</string>
-    <string>remote-notification</string>
+    <string>fetch</string>
+    <string>processing</string>
 </array>
 
 <key>BGTaskSchedulerPermittedIdentifiers</key>
@@ -48,328 +125,213 @@ In your `ios/Runner/Info.plist`, add:
 </array>
 ```
 
-### 2. Add HealthKit Capability
+Enable HealthKit in Xcode → Target → Signing & Capabilities → + HealthKit.
 
-1. Open your project in Xcode
-2. Go to **Signing & Capabilities**
-3. Click **+ Capability**
-4. Add **HealthKit**
+---
 
-### 3. Add HealthKit Usage Description
+## Backend Integration
 
-In your `ios/Runner/Info.plist`:
+Your backend needs ONE endpoint to generate credentials:
 
-```xml
-<key>NSHealthShareUsageDescription</key>
-<string>This app needs access to your health data to sync it with your account.</string>
+```javascript
+// Node.js / Express example
+app.post('/api/health/connect', authenticateUser, async (req, res) => {
+  // 1. Get your authenticated user
+  const userId = req.user.id;
+  
+  // 2. Call Open Wearables API to generate token
+  const response = await fetch('https://api.openwearables.com/v1/tokens', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': process.env.OPENWEARABLES_API_KEY, // Secret! Never expose!
+    },
+    body: JSON.stringify({
+      externalId: userId.toString(),
+    }),
+  });
+  
+  const { userId: owUserId, accessToken } = await response.json();
+  
+  // 3. Return credentials (NOT the API Key!)
+  res.json({ userId: owUserId, accessToken });
+});
 ```
 
-## Usage
+---
 
-### 1. Initialize the Plugin
+## SDK Usage
+
+### 1. Configure (once at app start)
 
 ```dart
-import 'package:health_bg_sync/health_bg_sync.dart';
-import 'package:health_bg_sync/health_data_type.dart';
+await HealthBgSync.configure(
+  environment: HealthBgSyncEnvironment.production,
+);
 
-await HealthBgSync.initialize(
-  endpoint: 'https://your-api.com/health/sync',
-  token: 'your-auth-token',
+// Session is automatically restored if user was previously signed in
+if (HealthBgSync.isSignedIn) {
+  print('Welcome back, ${HealthBgSync.currentUser?.userId}!');
+}
+```
+
+### 2. Sign In
+
+```dart
+// Get credentials from YOUR backend
+final response = await yourApi.post('/health/connect');
+
+// Sign in with the credentials
+try {
+  final user = await HealthBgSync.signIn(
+    userId: response['userId'],
+    accessToken: response['accessToken'],
+  );
+  print('Connected: ${user.userId}');
+} on SignInException catch (e) {
+  print('Failed: ${e.message}');
+}
+```
+
+### 3. Request Permissions
+
+```dart
+final authorized = await HealthBgSync.requestAuthorization(
   types: [
     HealthDataType.steps,
     HealthDataType.heartRate,
-    HealthDataType.activeEnergyBurned,
-    // Add more types as needed
+    HealthDataType.sleep,
+    HealthDataType.workout,
   ],
-  chunkSize: 1000, // Optional: default is 1000
-  recordsPerChunk: 10000, // Optional: default is 10000 (~2-3MB per request)
-  listenToLogs: true, // Optional: automatically print logs to console (default: true)
 );
 ```
 
-**Parameters:**
-- `endpoint` (required): Your backend API endpoint URL
-- `token` (required): Authentication token (sent as `Authorization: Bearer {token}`)
-- `types` (required): List of health data types to sync
-- `chunkSize` (optional): Internal chunk size for processing (default: 1000)
-- `recordsPerChunk` (optional): Maximum records per HTTP request to prevent timeouts (default: 10000)
-- `listenToLogs` (optional): Automatically listen to and print logs from native plugin (default: true)
-
-### 2. Request Authorization
-
-Request HealthKit read permissions:
+### 4. Start Background Sync
 
 ```dart
-bool authorized = await HealthBgSync.requestAuthorization();
-if (authorized) {
-  print('HealthKit authorization granted');
-} else {
-  print('HealthKit authorization denied');
-}
+await HealthBgSync.startBackgroundSync();
 ```
 
-**Returns:** `true` if authorization was granted, `false` otherwise.
-
-### 3. Start Background Sync
-
-Start the background sync process. This will:
-- Register observer queries for all configured types
-- Perform a full export on first sync (if not already done)
-- Perform incremental syncs for subsequent runs
-- Schedule background tasks for catch-up syncing
+### 5. Sign Out
 
 ```dart
-bool started = await HealthBgSync.startBackgroundSync();
-if (started) {
-  print('Background sync started successfully');
-} else {
-  print('Failed to start sync - check HealthKit availability and configuration');
-}
+await HealthBgSync.signOut();
+// All credentials cleared from Keychain
 ```
 
-**Returns:** `true` if sync started successfully, `false` if:
-- HealthKit is not available on the device
-- Endpoint or token is not configured
-- No health data types are being tracked
-
-**Important:** This method returns immediately with the result. The actual sync happens asynchronously in the background.
-
-### 4. Manual Sync
-
-Trigger a manual incremental sync (uses existing anchors):
-
-```dart
-await HealthBgSync.syncNow();
-```
-
-### 5. Stop Background Sync
-
-Stop all background observers and cancel scheduled tasks:
-
-```dart
-await HealthBgSync.stopBackgroundSync();
-```
-
-### 6. Reset Anchors
-
-Reset all anchors for the current endpoint (forces full export on next sync):
-
-```dart
-await HealthBgSync.resetAnchors();
-```
-
-**Note:** Logs are automatically printed to the console by default when `listenToLogs: true` (default) is set in `initialize()`. Logs include:
-- Sync progress and status updates
-- Data collection and query results
-- Upload progress and HTTP responses
-- Error messages and warnings
+---
 
 ## Complete Example
 
 ```dart
-import 'package:health_bg_sync/health_bg_sync.dart';
-import 'package:health_bg_sync/health_data_type.dart';
-
-class HealthSyncService {
-  Future<void> setupSync() async {
-    try {
-      // 1. Initialize
-      await HealthBgSync.initialize(
-        endpoint: 'https://api.example.com/health/sync',
-        token: 'your-auth-token',
-        types: [
-          HealthDataType.steps,
-          HealthDataType.heartRate,
-          HealthDataType.distanceWalkingRunning,
-          HealthDataType.activeEnergyBurned,
-        ],
-        recordsPerChunk: 10000,
-      );
-
-      // 2. Request authorization
-      bool authorized = await HealthBgSync.requestAuthorization();
-      if (!authorized) {
-        print('User denied HealthKit access');
+class HealthService {
+  final ApiClient _api;
+  
+  Future<void> connect() async {
+    // 1. Configure SDK (once)
+    await HealthBgSync.configure();
+    
+    // 2. Check current status
+    switch (HealthBgSync.status) {
+      case HealthBgSyncStatus.signedIn:
+        // Already signed in, start sync
+        await _startSync();
         return;
-      }
-
-      // 3. Start background sync
-      bool started = await HealthBgSync.startBackgroundSync();
-      if (started) {
-        print('✅ Background sync started successfully!');
-      } else {
-        print('❌ Failed to start background sync');
-      }
-      
-      // Note: Logs are automatically printed to console (enabled by default in initialize)
-    } catch (e) {
-      print('Error setting up sync: $e');
+        
+      case HealthBgSyncStatus.configured:
+        // Need to sign in
+        await _signIn();
+        await _startSync();
+        return;
+        
+      case HealthBgSyncStatus.notConfigured:
+        throw Exception('SDK not configured');
     }
+  }
+  
+  Future<void> _signIn() async {
+    // Get credentials from your backend
+    final response = await _api.post('/health/connect');
+    
+    // Sign in with SDK
+    await HealthBgSync.signIn(
+      userId: response['userId'],
+      accessToken: response['accessToken'],
+    );
+  }
+  
+  Future<void> _startSync() async {
+    await HealthBgSync.requestAuthorization(
+      types: HealthDataType.values,
+    );
+    await HealthBgSync.startBackgroundSync();
+  }
+  
+  Future<void> disconnect() async {
+    await HealthBgSync.stopBackgroundSync();
+    await HealthBgSync.signOut();
   }
 }
 ```
 
+---
+
+## Supported Health Data Types
+
+| Category | Types |
+|----------|-------|
+| **Activity** | steps, distanceWalkingRunning, distanceCycling, flightsClimbed |
+| **Energy** | activeEnergy, basalEnergy |
+| **Heart** | heartRate, restingHeartRate, heartRateVariabilitySDNN, vo2Max |
+| **Body** | bodyMass, height, bmi, bodyFatPercentage |
+| **Vitals** | bloodPressure, bloodGlucose, respiratoryRate |
+| **Sleep** | sleep, mindfulSession |
+| **Workouts** | workout |
+
+---
+
 ## API Reference
 
-### `initialize()`
+### HealthBgSync
 
-Initializes the plugin with configuration.
+| Method | Description |
+|--------|-------------|
+| `configure()` | Initialize SDK and restore session |
+| `signIn(userId:, accessToken:)` | Sign in with credentials from backend |
+| `signOut()` | Sign out and clear all credentials |
+| `requestAuthorization()` | Request health data permissions |
+| `startBackgroundSync()` | Enable background sync |
+| `stopBackgroundSync()` | Disable background sync |
+| `syncNow()` | Trigger immediate sync |
+| `resetAnchors()` | Reset sync state |
 
-```dart
-Future<void> initialize({
-  required String endpoint,
-  required String token,
-  required List<HealthDataType> types,
-  int chunkSize = 1000,
-  int recordsPerChunk = 10000,
-  bool listenToLogs = true,
-})
-```
+### Properties
 
-### `requestAuthorization()`
+| Property | Type | Description |
+|----------|------|-------------|
+| `isConfigured` | `bool` | SDK is configured |
+| `isSignedIn` | `bool` | User is signed in |
+| `currentUser` | `HealthBgSyncUser?` | Current user info |
+| `status` | `HealthBgSyncStatus` | Current SDK status |
 
-Requests HealthKit read permissions for configured types.
+### HealthBgSyncStatus
 
-```dart
-Future<bool> requestAuthorization()
-```
+| Status | Description |
+|--------|-------------|
+| `notConfigured` | SDK not configured, call `configure()` |
+| `configured` | SDK configured, but no user signed in |
+| `signedIn` | User signed in, ready to sync |
 
-**Returns:** `true` if authorization granted, `false` otherwise.
+### Exceptions
 
-### `startBackgroundSync()`
+| Exception | When Thrown |
+|-----------|-------------|
+| `NotConfiguredException` | `configure()` was not called |
+| `NotSignedInException` | No user signed in |
+| `SignInException` | Sign-in failed |
 
-Starts background sync process.
-
-```dart
-Future<bool> startBackgroundSync()
-```
-
-**Returns:** `true` if sync started successfully, `false` if prerequisites are not met.
-
-### `syncNow()`
-
-Manually triggers an incremental sync.
-
-```dart
-Future<void> syncNow()
-```
-
-### `stopBackgroundSync()`
-
-Stops all background sync operations.
-
-```dart
-Future<void> stopBackgroundSync()
-```
-
-### `resetAnchors()`
-
-Resets all anchors for the current endpoint.
-
-```dart
-Future<void> resetAnchors()
-```
-
-## How It Works
-
-### Full Export vs Incremental Sync
-
-- **First Sync (Full Export):** On the first sync for a given endpoint, all available health data is exported.
-- **Incremental Sync:** Subsequent syncs only send new or changed data since the last sync, using HealthKit anchors.
-
-### Chunking
-
-Large datasets are automatically split into chunks to:
-- Prevent HTTP 413 "Payload Too Large" errors
-- Prevent request timeouts
-- Optimize memory usage
-
-Data is sent in chunks sequentially, with each chunk containing up to `recordsPerChunk` records (default: 10,000).
-
-### Background Delivery
-
-The plugin uses HealthKit's observer queries to automatically detect when new health data is available and sync it in the background, even when the app is not running.
-
-### Background Tasks
-
-iOS background tasks are scheduled as fallbacks to ensure data is synced even if:
-- The device is in low-power mode
-- Background delivery is temporarily disabled
-- The app hasn't been opened recently
-
-## Data Format
-
-The plugin sends data to your endpoint as a JSON POST request:
-
-```json
-{
-  "data": {
-    "HKQuantityTypeIdentifierStepCount": [
-      {
-        "value": 1000,
-        "unit": "count",
-        "startDate": "2024-01-01T10:00:00Z",
-        "endDate": "2024-01-01T11:00:00Z",
-        "metadata": {}
-      }
-    ],
-    "HKQuantityTypeIdentifierHeartRate": [
-      {
-        "value": 72,
-        "unit": "count/min",
-        "startDate": "2024-01-01T10:00:00Z",
-        "endDate": "2024-01-01T10:01:00Z",
-        "metadata": {}
-      }
-    ]
-  },
-  "fullExport": false
-}
-```
-
-**Request Headers:**
-- `Content-Type: application/json`
-- `Authorization: Bearer {token}`
-- `Content-Length: {size}`
-
-## Troubleshooting
-
-### Sync Not Starting
-
-- Ensure HealthKit is available on the device (not available on iPad without Apple Watch)
-- Verify endpoint and token are correctly configured
-- Check that at least one health data type is being tracked
-- Ensure authorization was granted
-
-### Duplicate Requests
-
-The plugin includes safeguards to prevent duplicate requests:
-- Only one sync runs at a time
-- Initial sync blocks observer-triggered syncs
-- Chunks are sent sequentially
-
-If you see duplicates, check that:
-- Only one instance of the plugin is initialized
-- Multiple endpoints are using different endpoint keys (they're isolated automatically)
-
-### Timeouts
-
-If you experience timeouts:
-- Reduce `recordsPerChunk` (try 5000 or lower)
-- Check your server response time
-- Ensure network connectivity
-
-### HTTP 413 Errors
-
-Reduce `recordsPerChunk` to send smaller payloads.
-
-## Limitations
-
-- iOS only (HealthKit is iOS-specific)
-- Requires HealthKit authorization from user
-- Background sync requires proper iOS background modes configuration
-- Some health data types may have limited availability depending on device capabilities
+---
 
 ## License
 
-See LICENSE file for details.
+MIT License

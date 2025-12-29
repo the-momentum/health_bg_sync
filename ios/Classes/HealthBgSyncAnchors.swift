@@ -3,24 +3,27 @@ import HealthKit
 
 extension HealthBgSyncPlugin {
 
-    // MARK: - Keys (per-endpoint)
-    internal func endpointKey() -> String {
-        guard let s = endpoint?.absoluteString, !s.isEmpty else { return "endpoint.none" }
-        // Simple safe key for UserDefaults (no CryptoKit)
-        let safe = s.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression)
-        return "ep.\(safe)"
+    // MARK: - Keys (per-user)
+    internal func userKey() -> String {
+        guard let userId = userId, !userId.isEmpty else { return "user.none" }
+        return "user.\(userId)"
     }
 
-    internal func anchorKey(for type: HKSampleType) -> String { "anchor.\(endpointKey()).\(type.identifier)" }
-    internal func fullDoneKey() -> String { "fullDone.\(endpointKey())" }
-
-    // Identifier-based variants (to store anchors without needing HKSampleType in memory)
-    internal func anchorKey(typeIdentifier: String, endpointKey: String) -> String {
-        return "anchor.\(endpointKey).\(typeIdentifier)"
+    internal func anchorKey(for type: HKSampleType) -> String { 
+        "anchor.\(userKey()).\(type.identifier)" 
+    }
+    
+    internal func fullDoneKey() -> String { 
+        "fullDone.\(userKey())" 
     }
 
-    internal func saveAnchorData(_ data: Data, typeIdentifier: String, endpointKey: String) {
-        defaults.set(data, forKey: anchorKey(typeIdentifier: typeIdentifier, endpointKey: endpointKey))
+    // Identifier-based variants
+    internal func anchorKey(typeIdentifier: String, userKey: String) -> String {
+        return "anchor.\(userKey).\(typeIdentifier)"
+    }
+
+    internal func saveAnchorData(_ data: Data, typeIdentifier: String, userKey: String) {
+        defaults.set(data, forKey: anchorKey(typeIdentifier: typeIdentifier, userKey: userKey))
     }
 
     // MARK: - Anchors
@@ -36,40 +39,38 @@ extension HealthBgSyncPlugin {
     }
 
     internal func resetAllAnchors() {
-        for t in trackedTypes { defaults.removeObject(forKey: anchorKey(for: t)) }
+        for t in trackedTypes { 
+            defaults.removeObject(forKey: anchorKey(for: t)) 
+        }
         defaults.set(false, forKey: fullDoneKey())
     }
 
-    // MARK: - Initial sync plan
+    // MARK: - Initial sync
     internal func initialSyncKickoff(completion: @escaping (Bool)->Void) {
-        // Check prerequisites for starting sync
         guard HKHealthStore.isHealthDataAvailable() else {
-            logMessage("❌ HealthKit data not available, cannot start sync")
+            logMessage("❌ HealthKit not available")
             completion(false)
             return
         }
         
-        guard endpoint != nil, token != nil else {
-            logMessage("❌ Endpoint or token not set, cannot start sync")
+        guard syncEndpoint != nil, accessToken != nil else {
+            logMessage("❌ No endpoint or token")
             completion(false)
             return
         }
         
         guard !trackedTypes.isEmpty else {
-            logMessage("❌ No tracked types configured, cannot start sync")
+            logMessage("❌ No tracked types")
             completion(false)
             return
         }
         
         let fullDone = defaults.bool(forKey: fullDoneKey())
         if fullDone {
-            // Endpoint already completed full export → do incremental only
-            logMessage("✅ Full export already done, performing incremental sync only")
+            logMessage("✅ Incremental sync")
             syncAll(fullExport: false, completion: { completion(true) })
         } else {
-            // First time for this endpoint → perform full export
-            // Note: fullDone will be marked true AFTER successful upload (in URLSessionDelegate)
-            logMessage("🔄 First time sync for this endpoint, performing full export")
+            logMessage("🔄 Full export")
             isInitialSyncInProgress = true
             syncAll(fullExport: true, completion: { completion(true) })
         }
