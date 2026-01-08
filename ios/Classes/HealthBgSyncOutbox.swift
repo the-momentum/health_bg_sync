@@ -149,8 +149,12 @@ extension HealthBgSyncPlugin {
         req.httpBody = payloadData
         req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
         
-        self.logMessage("📤 Uploading to \(endpoint.absoluteString)")
-        
+        if let payloadString = String(data: payloadData, encoding: .utf8) {
+            let limit = 1000
+            let summary = payloadString.count > limit ? String(payloadString.prefix(limit)) + "... (truncated)" : payloadString
+            self.logMessage("📤 Request Payload: \(summary)")
+        }
+
         let task = foregroundSession.dataTask(with: req) { [weak self] data, response, error in
             guard let self = self else { return }
             
@@ -167,6 +171,10 @@ extension HealthBgSyncPlugin {
             if let httpResponse = response as? HTTPURLResponse {
                 self.logMessage("📥 Response: HTTP \(httpResponse.statusCode)")
                 
+                if let data = data, let responseString = String(data: data, encoding: .utf8) {
+                    self.logMessage("📥 Response Body: \(responseString)")
+                }
+
                 if (200...299).contains(httpResponse.statusCode) {
                     self.logMessage("✅ Upload successful")
                     
