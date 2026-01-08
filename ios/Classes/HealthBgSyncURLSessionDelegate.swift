@@ -38,6 +38,14 @@ extension HealthBgSyncPlugin {
             if let url = http.url {
                 print("📥 Response URL: \(url.absoluteString)")
             }
+
+            // Log response body if available
+            if let data = backgroundDataBuffer[task.taskIdentifier] {
+                if let responseString = String(data: data, encoding: .utf8) {
+                    print("📥 Response Body: \(responseString)")
+                }
+                backgroundDataBuffer.removeValue(forKey: task.taskIdentifier)
+            }
         } else {
             print("⚠️ No HTTP response received for task \(task.taskIdentifier)")
         }
@@ -110,5 +118,13 @@ extension HealthBgSyncPlugin {
             print("📥 Received HTTP response: \(httpResponse.statusCode) for task \(dataTask.taskIdentifier)")
         }
         completionHandler(.allow)
+    }
+
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if backgroundDataBuffer[dataTask.taskIdentifier] == nil {
+            backgroundDataBuffer[dataTask.taskIdentifier] = data
+        } else {
+            backgroundDataBuffer[dataTask.taskIdentifier]?.append(data)
+        }
     }
 }
