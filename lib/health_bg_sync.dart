@@ -11,11 +11,13 @@ export 'package:health_bg_sync/src/config.dart';
 export 'package:health_bg_sync/src/exceptions.dart';
 export 'package:health_bg_sync/src/status.dart';
 export 'package:health_bg_sync/src/user.dart';
+export 'health_bg_sync_method_channel.dart';
 
 /// Ensure MethodChannel is the default implementation.
-bool _hbgsRegistered = (() {
+/// This runs at library load time before any static methods can be called.
+final HealthBgSyncPlatform _platform = (() {
   HealthBgSyncPlatform.instance = MethodChannelHealthBgSync();
-  return true;
+  return HealthBgSyncPlatform.instance;
 })();
 
 /// Main entry point for the HealthBgSync plugin.
@@ -51,11 +53,6 @@ bool _hbgsRegistered = (() {
 /// ```
 class HealthBgSync {
   HealthBgSync._();
-
-  static HealthBgSyncPlatform get _platform {
-    assert(_hbgsRegistered, 'MethodChannel not registered');
-    return HealthBgSyncPlatform.instance;
-  }
 
   static HealthBgSyncConfig? _config;
   static HealthBgSyncUser? _currentUser;
@@ -96,7 +93,10 @@ class HealthBgSync {
     _config = HealthBgSyncConfig(environment: environment);
 
     // Configure and check if sync was auto-restored
-    _isSyncActive = await _platform.configure(baseUrl: _config!.baseUrl, customSyncUrl: customSyncUrl);
+    _isSyncActive = await _platform.configure(
+      baseUrl: _config!.baseUrl,
+      customSyncUrl: customSyncUrl,
+    );
 
     // Try to restore existing session from Keychain
     final restoredUserId = await _platform.restoreSession();
@@ -136,6 +136,12 @@ class HealthBgSync {
   /// The accessToken must be obtained from your backend server, which
   /// generates it via communication with the Open Wearables API.
   ///
+  /// ## Token Refresh
+  ///
+  /// Pass [appId], [appSecret], and [baseUrl] to enable automatic token
+  /// refresh. The token is valid for 60 minutes, and will be automatically
+  /// refreshed before sync operations if expired.
+  ///
   /// ## Flow
   ///
   /// 1. Your mobile app requests credentials from YOUR backend
@@ -144,23 +150,33 @@ class HealthBgSync {
   /// 4. Mobile app calls this method with the credentials
   ///
   /// ```dart
-  /// // 1. Get credentials from your backend
-  /// final response = await yourApi.post('/health/connect');
-  ///
-  /// // 2. Sign in with the credentials
   /// final user = await HealthBgSync.signIn(
   ///   userId: response['userId'],
   ///   accessToken: response['accessToken'],
+  ///   appId: 'your-app-id',        // For auto-refresh
+  ///   appSecret: 'your-app-secret', // For auto-refresh
+  ///   baseUrl: 'https://api.openwearables.io', // For auto-refresh
   /// );
-  /// print('Connected: ${user.userId}');
   /// ```
   ///
   /// Throws [NotConfiguredException] if [configure] was not called.
   /// Throws [SignInException] if sign-in fails.
-  static Future<HealthBgSyncUser> signIn({required String userId, required String accessToken}) async {
+  static Future<HealthBgSyncUser> signIn({
+    required String userId,
+    required String accessToken,
+    String? appId,
+    String? appSecret,
+    String? baseUrl,
+  }) async {
     if (_config == null) throw const NotConfiguredException();
 
-    await _platform.signIn(userId: userId, accessToken: accessToken);
+    await _platform.signIn(
+      userId: userId,
+      accessToken: accessToken,
+      appId: appId,
+      appSecret: appSecret,
+      baseUrl: baseUrl,
+    );
 
     _currentUser = HealthBgSyncUser(userId: userId);
 
@@ -194,9 +210,13 @@ class HealthBgSync {
   /// Returns true if authorization was successful, false otherwise.
   ///
   /// Throws [NotSignedInException] if no user is signed in.
-  static Future<bool> requestAuthorization({required List<HealthDataType> types}) async {
+  static Future<bool> requestAuthorization({
+    required List<HealthDataType> types,
+  }) async {
     _ensureSignedIn();
-    return _platform.requestAuthorization(types: types.map((e) => e.id).toList(growable: false));
+    return _platform.requestAuthorization(
+      types: types.map((e) => e.id).toList(growable: false),
+    );
   }
 
   // MARK: - Sync Operations
