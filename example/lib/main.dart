@@ -16,6 +16,17 @@ void main() async {
 final List<String> appLogs = [];
 const int _maxLogEntries = 1000;
 
+// Notifier to trigger rebuilds when logs change
+final logUpdateNotifier = ValueNotifier<int>(0);
+
+void _addLog(String message) {
+  appLogs.add(message);
+  if (appLogs.length > _maxLogEntries) {
+    appLogs.removeRange(0, appLogs.length - _maxLogEntries);
+  }
+  logUpdateNotifier.value++;
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -76,13 +87,7 @@ class _HomePageState extends State<HomePage> {
   void _subscribeToNativeLogs() {
     MethodChannelHealthBgSync.logStream.listen((message) {
       final timestamp = DateTime.now().toIso8601String().split('T').last.split('.').first;
-      setState(() {
-        appLogs.add('$timestamp $message');
-        // Keep only the last N entries to prevent memory/performance issues
-        if (appLogs.length > _maxLogEntries) {
-          appLogs.removeRange(0, appLogs.length - _maxLogEntries);
-        }
-      });
+      _addLog('$timestamp $message');
     });
   }
 
@@ -201,11 +206,7 @@ class _HomePageState extends State<HomePage> {
   void _setStatus(String message) {
     setState(() => _statusMessage = message);
     final log = '${DateTime.now().toIso8601String().split('T').last.split('.').first} $message';
-    appLogs.add(log);
-    // Keep only the last N entries to prevent memory/performance issues
-    if (appLogs.length > _maxLogEntries) {
-      appLogs.removeRange(0, appLogs.length - _maxLogEntries);
-    }
+    _addLog(log);
     debugPrint('[Demo] $message');
   }
 
@@ -604,6 +605,20 @@ class LogsPage extends StatefulWidget {
 }
 
 class _LogsPageState extends State<LogsPage> {
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<String> get _filteredLogs {
+    if (_searchQuery.isEmpty) return appLogs;
+    return appLogs.where((log) => log.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -623,34 +638,67 @@ class _LogsPageState extends State<LogsPage> {
           CupertinoButton(
             padding: const EdgeInsets.all(12),
             child: const Icon(CupertinoIcons.trash, color: Color(0xFFFF3B30)),
-            onPressed: () => setState(() => appLogs.clear()),
+            onPressed: () {
+              appLogs.clear();
+              logUpdateNotifier.value++;
+            },
           ),
         ],
       ),
-      body: appLogs.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(CupertinoIcons.doc_text, size: 48, color: Colors.grey[300]),
-                  const SizedBox(height: 12),
-                  Text('No logs yet', style: TextStyle(fontSize: 17, color: Colors.grey[400])),
-                ],
+      body: ValueListenableBuilder<int>(
+        valueListenable: logUpdateNotifier,
+        builder: (context, _, __) {
+          final filteredLogs = _filteredLogs;
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: CupertinoSearchTextField(
+                  controller: _searchController,
+                  placeholder: 'Search in logs...',
+                  onChanged: (value) => setState(() => _searchQuery = value),
+                ),
               ),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.all(16),
-              itemCount: appLogs.length,
-              separatorBuilder: (context, index) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final log = appLogs[appLogs.length - 1 - index];
-                return _LogItem(
-                  log: log,
-                  // Use log content + index as key for better performance
-                  key: ValueKey('${appLogs.length - 1 - index}_${log.hashCode}'),
-                );
-              },
-            ),
+              Expanded(
+                child: appLogs.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(CupertinoIcons.doc_text, size: 48, color: Colors.grey[300]),
+                            const SizedBox(height: 12),
+                            Text('No logs yet', style: TextStyle(fontSize: 17, color: Colors.grey[400])),
+                          ],
+                        ),
+                      )
+                    : filteredLogs.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(CupertinoIcons.search, size: 48, color: Colors.grey[300]),
+                            const SizedBox(height: 12),
+                            Text('No results', style: TextStyle(fontSize: 17, color: Colors.grey[400])),
+                          ],
+                        ),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: filteredLogs.length,
+                        separatorBuilder: (context, index) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final log = filteredLogs[filteredLogs.length - 1 - index];
+                          return _LogItem(
+                            log: log,
+                            key: ValueKey('${filteredLogs.length - 1 - index}_${log.hashCode}'),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

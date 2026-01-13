@@ -66,7 +66,7 @@ extension HealthBgSyncPlugin {
                 // For combined uploads, save all anchors
                 if !anchorPath.isEmpty,
                    let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)),
-                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSDictionary.self, from: anchorData) as? [String: Data] {
+                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSDictionary.self, NSString.self, NSData.self], from: anchorData) as? [String: Data] {
                     for (typeId, anchorData) in anchorsDict {
                         saveAnchorData(anchorData, typeIdentifier: typeId, userKey: item.userKey)
                     }

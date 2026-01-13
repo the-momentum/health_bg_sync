@@ -150,9 +150,7 @@ extension HealthBgSyncPlugin {
         req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
         
         if let payloadString = String(data: payloadData, encoding: .utf8) {
-            let limit = 1000
-            let summary = payloadString.count > limit ? String(payloadString.prefix(limit)) + "... (truncated)" : payloadString
-            self.logMessage("📤 Request Payload: \(summary)")
+            self.logMessage("📤 Request Payload: \(payloadString)")
         }
 
         let task = foregroundSession.dataTask(with: req) { [weak self] data, response, error in
@@ -184,7 +182,7 @@ extension HealthBgSyncPlugin {
                     completion(true)
                 } else {
                     if let data = data, let responseString = String(data: data, encoding: .utf8) {
-                        self.logMessage("⛔️ Upload failed: \(String(responseString.prefix(200)))")
+                        self.logMessage("⛔️ Upload failed: \(responseString)")
                     }
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                     completion(false)
@@ -210,7 +208,7 @@ extension HealthBgSyncPlugin {
         if let anchorPath = anchorPath, !anchorPath.isEmpty {
             if item.typeIdentifier == "combined" {
                 if let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)),
-                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSDictionary.self, from: anchorData) as? [String: Data] {
+                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSDictionary.self, NSString.self, NSData.self], from: anchorData) as? [String: Data] {
                     for (typeId, anchorData) in anchorsDict {
                         saveAnchorData(anchorData, typeIdentifier: typeId, userKey: item.userKey)
                     }
