@@ -100,8 +100,6 @@ extension HealthBgSyncPlugin {
         
         do {
             try data.write(to: payloadURL, options: Data.WritingOptions.atomic)
-            let fileSizeMB = Double(data.count) / (1024 * 1024)
-            self.logMessage("✅ Payload: \(String(format: "%.2f", fileSizeMB)) MB")
         } catch {
             self.logMessage("❌ Failed to write payload: \(error.localizedDescription)")
             completion(false)
@@ -149,11 +147,8 @@ extension HealthBgSyncPlugin {
         req.httpBody = payloadData
         req.setValue("\(payloadData.count)", forHTTPHeaderField: "Content-Length")
         
-        if let payloadString = String(data: payloadData, encoding: .utf8) {
-            let limit = 1000
-            let summary = payloadString.count > limit ? String(payloadString.prefix(limit)) + "... (truncated)" : payloadString
-            self.logMessage("📤 Request Payload: \(summary)")
-        }
+        // Log payload summary (without full data)
+        self.logPayloadSummary(payloadData, label: "📤 Sending")
 
         let task = foregroundSession.dataTask(with: req) { [weak self] data, response, error in
             guard let self = self else { return }
@@ -169,23 +164,22 @@ extension HealthBgSyncPlugin {
             }
             
             if let httpResponse = response as? HTTPURLResponse {
-                self.logMessage("📥 Response: HTTP \(httpResponse.statusCode)")
-                
-                if let data = data, let responseString = String(data: data, encoding: .utf8) {
-                    self.logMessage("📥 Response Body: \(responseString)")
-                }
-
                 if (200...299).contains(httpResponse.statusCode) {
-                    self.logMessage("✅ Upload successful")
+                    self.logMessage("✅ HTTP \(httpResponse.statusCode)")
                     
                     self.handleSuccessfulUpload(itemPath: itemURL.path, anchorPath: anchorsURL?.path, wasFullExport: wasFullExport)
                     
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                     completion(true)
                 } else {
-                    if let data = data, let responseString = String(data: data, encoding: .utf8) {
-                        self.logMessage("⛔️ Upload failed: \(String(responseString.prefix(200)))")
+                    // Log error response body for debugging
+                    var errorMsg = "❌ HTTP \(httpResponse.statusCode)"
+                    if let data = data, let errorBody = String(data: data, encoding: .utf8) {
+                        // Truncate error body to avoid huge logs
+                        let truncated = errorBody.count > 200 ? String(errorBody.prefix(200)) + "..." : errorBody
+                        errorMsg += " - \(truncated)"
                     }
+                    self.logMessage(errorMsg)
                     try? FileManager.default.removeItem(atPath: payloadURL.path)
                     completion(false)
                 }
@@ -210,7 +204,7 @@ extension HealthBgSyncPlugin {
         if let anchorPath = anchorPath, !anchorPath.isEmpty {
             if item.typeIdentifier == "combined" {
                 if let anchorData = try? Data(contentsOf: URL(fileURLWithPath: anchorPath)),
-                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSDictionary.self, from: anchorData) as? [String: Data] {
+                   let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSDictionary.self, NSString.self, NSData.self], from: anchorData) as? [String: Data] {
                     for (typeId, anchorData) in anchorsDict {
                         saveAnchorData(anchorData, typeIdentifier: typeId, userKey: item.userKey)
                     }

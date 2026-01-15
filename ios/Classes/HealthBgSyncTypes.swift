@@ -283,33 +283,93 @@ extension HealthBgSyncPlugin {
 
     private func _mapWorkout(_ w: HKWorkout) -> [String: Any] {
         let df = ISO8601DateFormatter()
+        
+        // Build workout statistics array
         var stats: [[String: Any]] = []
-
-        if let energy = w.totalEnergyBurned {
-            stats.append([
-                "type": "totalEnergyBurned",
-                "value": energy.doubleValue(for: .kilocalorie()),
-                "unit": "Cal"
-            ])
-        }
-        if let dist = w.totalDistance {
-            stats.append([
-                "type": "totalDistance",
-                "value": dist.doubleValue(for: .meter()),
-                "unit": "m"
-            ])
-        }
-
-        // totalSteps is not generally stored on HKWorkout (needs extra statistics query).
-        // If Apple stored it in metadata, expose it. Otherwise omit.
-        if let meta = w.metadata,
-           let steps = meta[HKMetadataKeyIndoorWorkout] as? Double, steps >= 0 {
-            // This is just an example key; real steps are usually NOT here.
-            stats.append([
-                "type": "totalSteps",
-                "value": steps,
-                "unit": "count"
-            ])
+        
+        // Duration
+        stats.append([
+            "type": "duration",
+            "value": w.duration,
+            "unit": "s"
+        ])
+        
+        if #available(iOS 16.0, *) {
+            // iOS 16+ - use statistics(for:) API
+            if let energyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+               let energyStats = w.statistics(for: energyType),
+               let sum = energyStats.sumQuantity() {
+                stats.append([
+                    "type": "activeEnergyBurned",
+                    "value": sum.doubleValue(for: .kilocalorie()),
+                    "unit": "kcal"
+                ])
+            }
+            
+            // Distance - try multiple types based on workout
+            let distanceTypes: [HKQuantityTypeIdentifier] = [
+                .distanceWalkingRunning,
+                .distanceCycling,
+                .distanceSwimming,
+                .distanceDownhillSnowSports
+            ]
+            for distanceTypeId in distanceTypes {
+                if let distType = HKQuantityType.quantityType(forIdentifier: distanceTypeId),
+                   let distStats = w.statistics(for: distType),
+                   let sum = distStats.sumQuantity() {
+                    stats.append([
+                        "type": "distance",
+                        "value": sum.doubleValue(for: .meter()),
+                        "unit": "m"
+                    ])
+                    break
+                }
+            }
+            
+            // Heart rate statistics
+            if let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate),
+               let hrStats = w.statistics(for: hrType) {
+                if let avg = hrStats.averageQuantity() {
+                    stats.append([
+                        "type": "averageHeartRate",
+                        "value": avg.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
+                        "unit": "bpm"
+                    ])
+                }
+                if let max = hrStats.maximumQuantity() {
+                    stats.append([
+                        "type": "maxHeartRate",
+                        "value": max.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
+                        "unit": "bpm"
+                    ])
+                }
+            }
+            
+            // Elevation gain - from metadata
+            if let elevationAscended = w.metadata?[HKMetadataKeyElevationAscended] as? HKQuantity {
+                stats.append([
+                    "type": "elevationGain",
+                    "value": elevationAscended.doubleValue(for: .meter()),
+                    "unit": "m"
+                ])
+            }
+            
+        } else {
+            // iOS 15 and earlier - use deprecated properties
+            if let energy = w.totalEnergyBurned {
+                stats.append([
+                    "type": "activeEnergyBurned",
+                    "value": energy.doubleValue(for: .kilocalorie()),
+                    "unit": "kcal"
+                ])
+            }
+            if let dist = w.totalDistance {
+                stats.append([
+                    "type": "distance",
+                    "value": dist.doubleValue(for: .meter()),
+                    "unit": "m"
+                ])
+            }
         }
 
         return [
@@ -424,8 +484,112 @@ extension HealthBgSyncPlugin {
     }
 
     private func _workoutTypeString(_ t: HKWorkoutActivityType) -> String {
-        // Use Apple's case names as strings; you may map to your own taxonomy if needed.
-        return String(describing: t)
+        switch t {
+        // Running & Walking
+        case .running: return "running"
+        case .walking: return "walking"
+        case .hiking: return "hiking"
+        case .wheelchairRunPace: return "wheelchair_run"
+        case .wheelchairWalkPace: return "wheelchair_walk"
+        
+        // Cycling
+        case .cycling: return "cycling"
+        case .handCycling: return "hand_cycling"
+        
+        // Swimming
+        case .swimming: return "swimming"
+        case .paddleSports: return "paddle_sports"
+        case .rowing: return "rowing"
+        case .surfingSports: return "surfing"
+        case .waterFitness: return "water_fitness"
+        case .waterPolo: return "water_polo"
+        case .waterSports: return "water_sports"
+        
+        // Gym & Fitness
+        case .traditionalStrengthTraining: return "strength_training"
+        case .functionalStrengthTraining: return "functional_strength_training"
+        case .coreTraining: return "core_training"
+        case .crossTraining: return "cross_training"
+        case .mixedCardio: return "mixed_cardio"
+        case .highIntensityIntervalTraining: return "hiit"
+        case .flexibility: return "flexibility"
+        case .cooldown: return "cooldown"
+        case .elliptical: return "elliptical"
+        case .stairClimbing: return "stair_climbing"
+        case .stairs: return "stairs"
+        case .stepTraining: return "step_training"
+        case .fitnessGaming: return "fitness_gaming"
+        case .jumpRope: return "jump_rope"
+        case .pilates: return "pilates"
+        case .preparationAndRecovery: return "preparation_and_recovery"
+        
+        // Mind & Body
+        case .yoga: return "yoga"
+        case .mindAndBody: return "mind_and_body"
+        case .barre: return "barre"
+        case .taiChi: return "tai_chi"
+        
+        // Dance
+        case .dance: return "dance"
+        case .danceInspiredTraining: return "dance_inspired_training"
+        case .socialDance: return "social_dance"
+        case .cardioDance: return "cardio_dance"
+        
+        // Racket Sports
+        case .tennis: return "tennis"
+        case .tableTennis: return "table_tennis"
+        case .badminton: return "badminton"
+        case .squash: return "squash"
+        case .racquetball: return "racquetball"
+        case .pickleball: return "pickleball"
+        
+        // Team Sports
+        case .soccer: return "soccer"
+        case .basketball: return "basketball"
+        case .baseball: return "baseball"
+        case .softball: return "softball"
+        case .americanFootball: return "american_football"
+        case .australianFootball: return "australian_football"
+        case .rugby: return "rugby"
+        case .hockey: return "hockey"
+        case .lacrosse: return "lacrosse"
+        case .volleyball: return "volleyball"
+        case .handball: return "handball"
+        case .cricket: return "cricket"
+        case .discSports: return "disc_sports"
+        
+        // Combat Sports
+        case .boxing: return "boxing"
+        case .kickboxing: return "kickboxing"
+        case .martialArts: return "martial_arts"
+        case .wrestling: return "wrestling"
+        case .fencing: return "fencing"
+        
+        // Winter Sports
+        case .snowSports: return "snow_sports"
+        case .crossCountrySkiing: return "cross_country_skiing"
+        case .downhillSkiing: return "downhill_skiing"
+        case .snowboarding: return "snowboarding"
+        case .skatingSports: return "skating"
+        case .curling: return "curling"
+        
+        // Outdoor Activities
+        case .golf: return "golf"
+        case .archery: return "archery"
+        case .fishing: return "fishing"
+        case .hunting: return "hunting"
+        case .climbing: return "climbing"
+        case .equestrianSports: return "equestrian"
+        case .play: return "play"
+        
+        // Track & Field
+        case .trackAndField: return "track_and_field"
+        
+        // Other
+        case .other: return "other"
+        
+        @unknown default: return "other"
+        }
     }
 
     private func _metadataList(_ meta: [String: Any]?) -> [[String: Any]] {

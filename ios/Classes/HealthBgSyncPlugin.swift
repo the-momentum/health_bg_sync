@@ -542,13 +542,15 @@ import BackgroundTasks
                 }
                 
                 if let error = error {
-                    self.logMessage("❌ \(type.identifier): \(error.localizedDescription)")
+                    self.logMessage("❌ \(self.shortTypeName(type.identifier)): \(error.localizedDescription)")
                     group.leave()
                     return 
                 }
                 
                 let samples = samplesOrNil ?? []
-                self.logMessage("✅ \(type.identifier): \(samples.count)")
+                if samples.count > 0 {
+                    self.logMessage("  \(self.shortTypeName(type.identifier)): \(samples.count)")
+                }
                 
                 lock.lock()
                 allSamples.addObjects(from: samples)
@@ -568,7 +570,7 @@ import BackgroundTasks
                 return 
             }
             
-            logMessage("✅ Total: \(allSamples.count) samples")
+            logMessage("📊 Total: \(allSamples.count) samples")
             
             self.syncLock.lock()
             self.isSyncing = false
@@ -596,7 +598,9 @@ import BackgroundTasks
             }
             
             let chunks = samples.chunked(into: self.recordsPerChunk)
-            self.logMessage("📦 \(chunks.count) chunk(s)")
+            if chunks.count > 1 {
+                self.logMessage("📦 Splitting into \(chunks.count) chunks")
+            }
             
             if chunks.isEmpty {
                 completion()
@@ -635,7 +639,16 @@ import BackgroundTasks
         let chunk = chunks[chunkIndex]
         let isLastChunk = (chunkIndex == chunks.count - 1)
         
-        logMessage("📤 Chunk \(chunkIndex + 1)/\(totalChunks)")
+        // Count records and workouts in this chunk
+        let workoutsCount = chunk.filter { $0 is HKWorkout }.count
+        let recordsCount = chunk.count - workoutsCount
+        var chunkDesc = "📤 Chunk \(chunkIndex + 1)/\(totalChunks): \(chunk.count) samples"
+        if workoutsCount > 0 && recordsCount > 0 {
+            chunkDesc += " (\(recordsCount) records, \(workoutsCount) workouts)"
+        } else if workoutsCount > 0 {
+            chunkDesc += " (\(workoutsCount) workouts)"
+        }
+        logMessage(chunkDesc)
         
         let payload = self.serializeCombined(samples: chunk, anchors: isLastChunk ? anchors : [:])
         let wasFullExport = fullExport && isLastChunk
@@ -647,7 +660,6 @@ import BackgroundTasks
             }
             
             if success {
-                self.logMessage("✅ Chunk \(chunkIndex + 1) sent")
                 self.sendChunksSequentially(
                     chunks: chunks,
                     anchors: anchors,
@@ -704,6 +716,60 @@ import BackgroundTasks
         }
     }
     
+    /// Logs a summary of the payload (types and counts) without the full data
+    internal func logPayloadSummary(_ data: Data, label: String) {
+        guard let jsonObject = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+              let dataDict = jsonObject["data"] as? [String: Any] else {
+            let sizeMB = Double(data.count) / (1024 * 1024)
+            logMessage("\(label): \(String(format: "%.2f", sizeMB)) MB")
+            return
+        }
+        
+        var summary: [String] = []
+        
+        // Count records by type
+        if let records = dataDict["records"] as? [[String: Any]] {
+            var typeCounts: [String: Int] = [:]
+            for record in records {
+                if let type = record["type"] as? String {
+                    // Extract short type name from full identifier
+                    let shortType = type.replacingOccurrences(of: "HKQuantityTypeIdentifier", with: "")
+                        .replacingOccurrences(of: "HKCategoryTypeIdentifier", with: "")
+                    typeCounts[shortType, default: 0] += 1
+                }
+            }
+            if !typeCounts.isEmpty {
+                let typesList = typeCounts.sorted { $0.value > $1.value }
+                    .map { "\($0.key): \($0.value)" }
+                    .joined(separator: ", ")
+                summary.append("Records: \(records.count) [\(typesList)]")
+            }
+        }
+        
+        // Count workouts
+        if let workouts = dataDict["workouts"] as? [[String: Any]], !workouts.isEmpty {
+            var workoutTypes: [String: Int] = [:]
+            for workout in workouts {
+                if let type = workout["type"] as? String {
+                    workoutTypes[type, default: 0] += 1
+                }
+            }
+            let workoutsList = workoutTypes.sorted { $0.value > $1.value }
+                .map { "\($0.key): \($0.value)" }
+                .joined(separator: ", ")
+            summary.append("Workouts: \(workouts.count) [\(workoutsList)]")
+        }
+        
+        let sizeMB = Double(data.count) / (1024 * 1024)
+        let sizeStr = String(format: "%.2f MB", sizeMB)
+        
+        if summary.isEmpty {
+            logMessage("\(label): \(sizeStr)")
+        } else {
+            logMessage("\(label): \(sizeStr) - \(summary.joined(separator: ", "))")
+        }
+    }
+    
     // MARK: - FlutterStreamHandler
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         logEventSink = events
@@ -713,6 +779,14 @@ import BackgroundTasks
     public func onCancel(withArguments arguments: Any?) -> FlutterError? {
         logEventSink = nil
         return nil
+    }
+    
+    // MARK: - Helpers
+    internal func shortTypeName(_ identifier: String) -> String {
+        return identifier
+            .replacingOccurrences(of: "HKQuantityTypeIdentifier", with: "")
+            .replacingOccurrences(of: "HKCategoryTypeIdentifier", with: "")
+            .replacingOccurrences(of: "HKWorkoutType", with: "Workout")
     }
 }
 
