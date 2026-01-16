@@ -157,6 +157,8 @@ extension HealthBgSyncPlugin {
                 let nsError = error as NSError
                 if nsError.code != NSURLErrorCancelled {
                     self.logMessage("❌ Upload error: \(error.localizedDescription)")
+                    // Mark for retry when connection is restored
+                    self.markNetworkError()
                 }
                 try? FileManager.default.removeItem(atPath: payloadURL.path)
                 completion(false)
@@ -185,6 +187,7 @@ extension HealthBgSyncPlugin {
                 }
             } else {
                 self.logMessage("⚠️ No HTTP response")
+                self.markNetworkError()
                 try? FileManager.default.removeItem(atPath: payloadURL.path)
                 completion(false)
             }

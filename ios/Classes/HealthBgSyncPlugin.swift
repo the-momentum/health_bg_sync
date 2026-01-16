@@ -2,6 +2,7 @@ import Flutter
 import UIKit
 import HealthKit
 import BackgroundTasks
+import Network
 
 @objc(HealthBgSyncPlugin) public class HealthBgSyncPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, URLSessionDelegate, URLSessionTaskDelegate, URLSessionDataDelegate {
 
@@ -31,6 +32,11 @@ import BackgroundTasks
     internal var isInitialSyncInProgress = false
     private var isSyncing: Bool = false
     private let syncLock = NSLock()
+    
+    // Network monitoring
+    private var networkMonitor: NWPathMonitor?
+    private let networkMonitorQueue = DispatchQueue(label: "health_sync_network_monitor")
+    private var wasDisconnected = false
 
     // Per-user state (anchors)
     internal let defaults = UserDefaults(suiteName: "com.healthbgsync.state") ?? .standard
@@ -157,6 +163,7 @@ import BackgroundTasks
 
         case "stopBackgroundSync":
             self.stopBackgroundDelivery()
+            self.stopNetworkMonitoring()
             self.cancelAllBGTasks()
             HealthBgSyncKeychain.setSyncActive(false)
             result(nil)
@@ -164,9 +171,37 @@ import BackgroundTasks
         case "resetAnchors":
             self.resetAllAnchors()
             result(nil)
+            
+        case "getSyncStatus":
+            handleGetSyncStatus(result: result)
+            
+        case "resumeSync":
+            handleResumeSync(result: result)
+            
+        case "clearSyncSession":
+            self.clearSyncSession()
+            result(nil)
 
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    // MARK: - Get Sync Status
+    private func handleGetSyncStatus(result: @escaping FlutterResult) {
+        result(getSyncStatusDict())
+    }
+    
+    // MARK: - Resume Sync
+    private func handleResumeSync(result: @escaping FlutterResult) {
+        guard hasResumableSyncSession() else {
+            result(FlutterError(code: "no_session", message: "No resumable sync session", details: nil))
+            return
+        }
+        
+        // Just trigger normal sync - it will automatically filter out already sent samples
+        self.syncAll(fullExport: false) {
+            result(nil)
         }
     }
     
@@ -222,8 +257,25 @@ import BackgroundTasks
         }
         
         self.startBackgroundDelivery()
+        self.startNetworkMonitoring()
         self.scheduleAppRefresh()
         self.scheduleProcessing()
+        
+        // Check for resumable sync session and resume if found
+        if hasResumableSyncSession() {
+            logMessage("📂 Found interrupted sync, will resume...")
+            // Trigger sync - it will automatically detect and resume
+            refreshTokenIfNeeded { [weak self] success in
+                guard let self = self else { return }
+                if success {
+                    self.syncAll(fullExport: false) {
+                        self.logMessage("✅ Resumed sync completed")
+                    }
+                } else {
+                    self.logMessage("⚠️ Token refresh failed, will retry later")
+                }
+            }
+        }
         
         logMessage("✅ Background sync auto-restored")
     }
@@ -265,6 +317,7 @@ import BackgroundTasks
         logMessage("🔓 Signing out")
         
         stopBackgroundDelivery()
+        stopNetworkMonitoring()
         cancelAllBGTasks()
         
         // Clear Keychain
@@ -312,6 +365,7 @@ import BackgroundTasks
         }
         
         self.startBackgroundDelivery()
+        self.startNetworkMonitoring()
         
         self.initialSyncKickoff { started in
             if started {
@@ -521,7 +575,15 @@ import BackgroundTasks
             return
         }
         
-        logMessage("🔄 Collecting data (fullExport: \(fullExport))")
+        // Check if we're resuming an interrupted sync
+        let existingState = loadSyncState()
+        let isResuming = existingState != nil && !existingState!.sentUUIDs.isEmpty
+        
+        if isResuming {
+            logMessage("🔄 Resuming interrupted sync (\(existingState!.sentUUIDs.count) already sent)")
+        } else {
+            logMessage("🔄 Collecting data (fullExport: \(fullExport))")
+        }
         
         let queryableTypes = getQueryableTypes()
         
@@ -570,31 +632,46 @@ import BackgroundTasks
                 return 
             }
             
-            logMessage("📊 Total: \(allSamples.count) samples")
+            var samples = allSamples.compactMap { $0 as? HKSample }
+            logMessage("📊 Total from HealthKit: \(samples.count) samples")
             
-            self.syncLock.lock()
-            self.isSyncing = false
-            self.isInitialSyncInProgress = false
-            self.syncLock.unlock()
+            // Filter out already sent samples if resuming
+            samples = self.filterSentSamples(samples)
             
-            guard allSamples.count > 0 else { 
-                self.logMessage("ℹ️ No samples")
+            guard samples.count > 0 else { 
+                self.logMessage("ℹ️ No new samples to send")
+                // If we were resuming, finalize the sync
+                if isResuming {
+                    self.finalizeSyncState()
+                }
+                self.syncLock.lock()
+                self.isSyncing = false
+                self.isInitialSyncInProgress = false
+                self.syncLock.unlock()
                 completion()
                 return 
             }
             
             guard let token = self.accessToken, let endpoint = self.syncEndpoint else { 
                 self.logMessage("❌ No token or endpoint")
+                self.syncLock.lock()
+                self.isSyncing = false
+                self.isInitialSyncInProgress = false
+                self.syncLock.unlock()
                 completion()
                 return 
             }
             
-            let samples = allSamples.compactMap { $0 as? HKSample }
             var anchors: [String: HKQueryAnchor] = [:]
             for (key, value) in allAnchors {
                 if let keyString = key as? String, let anchor = value as? HKQueryAnchor {
                     anchors[keyString] = anchor
                 }
+            }
+            
+            // Start sync state if not resuming
+            if !isResuming {
+                _ = self.startNewSyncState(fullExport: fullExport, anchors: anchors)
             }
             
             let chunks = samples.chunked(into: self.recordsPerChunk)
@@ -603,25 +680,35 @@ import BackgroundTasks
             }
             
             if chunks.isEmpty {
+                self.finalizeSyncState()
+                self.syncLock.lock()
+                self.isSyncing = false
+                self.isInitialSyncInProgress = false
+                self.syncLock.unlock()
                 completion()
                 return
             }
             
-            self.sendChunksSequentially(
+            self.sendChunksWithResume(
                 chunks: chunks,
                 anchors: anchors,
                 endpoint: endpoint,
                 token: token,
                 fullExport: fullExport,
                 chunkIndex: 0,
-                totalChunks: chunks.count,
-                completion: completion
-            )
+                totalChunks: chunks.count
+            ) {
+                self.syncLock.lock()
+                self.isSyncing = false
+                self.isInitialSyncInProgress = false
+                self.syncLock.unlock()
+                completion()
+            }
         }
     }
     
-    // MARK: - Send chunks
-    internal func sendChunksSequentially(
+    // MARK: - Send Chunks with UUID Tracking
+    internal func sendChunksWithResume(
         chunks: [[HKSample]],
         anchors: [String: HKQueryAnchor],
         endpoint: URL,
@@ -632,6 +719,8 @@ import BackgroundTasks
         completion: @escaping ()->Void
     ) {
         guard chunkIndex < chunks.count else {
+            // All done - finalize
+            finalizeSyncState()
             completion()
             return
         }
@@ -651,16 +740,22 @@ import BackgroundTasks
         logMessage(chunkDesc)
         
         let payload = self.serializeCombined(samples: chunk, anchors: isLastChunk ? anchors : [:])
-        let wasFullExport = fullExport && isLastChunk
         
-        self.enqueueCombinedUpload(payload: payload, anchors: isLastChunk ? anchors : [:], endpoint: endpoint, token: token, wasFullExport: wasFullExport) { [weak self] success in
+        // Extract UUIDs for this chunk
+        let chunkUUIDs = chunk.map { $0.uuid.uuidString }
+        
+        self.enqueueCombinedUpload(payload: payload, anchors: isLastChunk ? anchors : [:], endpoint: endpoint, token: token, wasFullExport: fullExport && isLastChunk) { [weak self] success in
             guard let self = self else {
                 completion()
                 return
             }
             
             if success {
-                self.sendChunksSequentially(
+                // Mark these UUIDs as sent
+                self.addSentUUIDs(chunkUUIDs)
+                
+                // Continue to next chunk
+                self.sendChunksWithResume(
                     chunks: chunks,
                     anchors: anchors,
                     endpoint: endpoint,
@@ -671,12 +766,12 @@ import BackgroundTasks
                     completion: completion
                 )
             } else {
-                self.logMessage("❌ Chunk \(chunkIndex + 1) failed")
+                self.logMessage("❌ Chunk \(chunkIndex + 1) failed, will resume later")
                 completion()
             }
         }
     }
-
+    
     internal func syncType(_ type: HKSampleType, fullExport: Bool, completion: @escaping ()->Void) {
         let anchor = fullExport ? nil : loadAnchor(for: type)
         
@@ -767,6 +862,84 @@ import BackgroundTasks
             logMessage("\(label): \(sizeStr)")
         } else {
             logMessage("\(label): \(sizeStr) - \(summary.joined(separator: ", "))")
+        }
+    }
+    
+    // MARK: - Network Monitoring
+    
+    internal func startNetworkMonitoring() {
+        // Don't start if already running
+        guard networkMonitor == nil else { return }
+        
+        networkMonitor = NWPathMonitor()
+        networkMonitor?.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            
+            let isConnected = path.status == .satisfied
+            
+            if isConnected {
+                // Network is available
+                if self.wasDisconnected {
+                    self.wasDisconnected = false
+                    self.logMessage("📶 Network restored")
+                    self.tryResumeAfterNetworkRestored()
+                }
+            } else {
+                // Network is not available
+                if !self.wasDisconnected {
+                    self.wasDisconnected = true
+                    self.logMessage("📵 Network lost")
+                }
+            }
+        }
+        
+        networkMonitor?.start(queue: networkMonitorQueue)
+        logMessage("📡 Network monitoring started")
+    }
+    
+    internal func stopNetworkMonitoring() {
+        networkMonitor?.cancel()
+        networkMonitor = nil
+        wasDisconnected = false
+    }
+    
+    /// Called when upload fails - marks network as disconnected so we can auto-resume
+    internal func markNetworkError() {
+        wasDisconnected = true
+    }
+    
+    /// Try to resume sync after network is restored
+    private func tryResumeAfterNetworkRestored() {
+        // Wait a bit for network to stabilize
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self else { return }
+            
+            // Check if we have an interrupted sync to resume
+            guard self.hasResumableSyncSession() else {
+                self.logMessage("ℹ️ No sync to resume")
+                return
+            }
+            
+            // Don't resume if already syncing
+            self.syncLock.lock()
+            let alreadySyncing = self.isSyncing
+            self.syncLock.unlock()
+            
+            if alreadySyncing {
+                self.logMessage("⏭️ Sync already in progress")
+                return
+            }
+            
+            self.logMessage("🔄 Resuming sync after network restored...")
+            self.refreshTokenIfNeeded { success in
+                if success {
+                    self.syncAll(fullExport: false) {
+                        self.logMessage("✅ Network resume sync completed")
+                    }
+                } else {
+                    self.logMessage("⚠️ Token refresh failed")
+                }
+            }
         }
     }
     

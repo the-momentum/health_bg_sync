@@ -403,7 +403,7 @@ extension HealthBgSyncPlugin {
         case HKObjectType.quantityType(forIdentifier: .oxygenSaturation):
             return HKUnit.percent()
         case HKObjectType.quantityType(forIdentifier: .bloodGlucose):
-            return HKUnit(from: "mg/dL")
+            return HKUnit.gramUnit(with: .milli).unitDivided(by: HKUnit.literUnit(with: .deci))
         case HKObjectType.quantityType(forIdentifier: .bloodPressureSystolic),
              HKObjectType.quantityType(forIdentifier: .bloodPressureDiastolic):
             return HKUnit.millimeterOfMercury()
@@ -446,7 +446,9 @@ extension HealthBgSyncPlugin {
         case HKObjectType.quantityType(forIdentifier: .height):
             return (.meter(), "m")
         case HKObjectType.quantityType(forIdentifier: .bodyMassIndex):
-            return (HKUnit(from: "kg/m2"), "kg/m2")
+            // BMI is dimensionless (count), but historically expressed as kg/m²
+            let bmiUnit = HKUnit.gramUnit(with: .kilo).unitDivided(by: HKUnit.meter().unitMultiplied(by: HKUnit.meter()))
+            return (bmiUnit, "kg/m²")
         case HKObjectType.quantityType(forIdentifier: .bodyFatPercentage):
             return (HKUnit.percent(), "%")
         case HKObjectType.quantityType(forIdentifier: .leanBodyMass):
@@ -460,14 +462,17 @@ extension HealthBgSyncPlugin {
         case HKObjectType.quantityType(forIdentifier: .respiratoryRate):
             return (.count().unitDivided(by: .minute()), "breaths/min")
         case HKObjectType.quantityType(forIdentifier: .bloodGlucose):
-            return (HKUnit(from: "mg/dL"), "mg/dL")
+            let glucoseUnit = HKUnit.gramUnit(with: .milli).unitDivided(by: HKUnit.literUnit(with: .deci))
+            return (glucoseUnit, "mg/dL")
         case HKObjectType.quantityType(forIdentifier: .insulinDelivery):
-            return (HKUnit(from: "IU"), "IU")
+            return (HKUnit.internationalUnit(), "IU")
         case HKObjectType.quantityType(forIdentifier: .bloodPressureSystolic),
              HKObjectType.quantityType(forIdentifier: .bloodPressureDiastolic):
             return (HKUnit.millimeterOfMercury(), "mmHg")
         case HKObjectType.quantityType(forIdentifier: .vo2Max):
-            return (HKUnit(from: "ml/kg*min"), "ml/kg*min")
+            // Use programmatic API to avoid string parsing issues
+            let vo2Unit = HKUnit.literUnit(with: .milli).unitDivided(by: HKUnit.gramUnit(with: .kilo)).unitDivided(by: HKUnit.minute())
+            return (vo2Unit, "mL/kg/min")
         case HKObjectType.quantityType(forIdentifier: .flightsClimbed):
             return (.count(), "count")
         case HKObjectType.quantityType(forIdentifier: .dietaryCarbohydrates),
@@ -477,9 +482,10 @@ extension HealthBgSyncPlugin {
         case HKObjectType.quantityType(forIdentifier: .dietaryWater):
             return (.liter(), "L")
         default:
-            // For unknown types, try to use the original unit to avoid conversion errors
-            print("⚠️ Unknown quantity type: \(qt.identifier), using original unit")
-            return (HKUnit(from: qt.identifier), qt.identifier)
+            // For unknown types, use count as a safe fallback to avoid crashes
+            // HKUnit(from:) will throw an exception if given an invalid unit string
+            print("⚠️ Unknown quantity type: \(qt.identifier), using count as fallback")
+            return (.count(), "count")
         }
     }
 

@@ -93,10 +93,7 @@ class HealthBgSync {
     _config = HealthBgSyncConfig(environment: environment);
 
     // Configure and check if sync was auto-restored
-    _isSyncActive = await _platform.configure(
-      baseUrl: _config!.baseUrl,
-      customSyncUrl: customSyncUrl,
-    );
+    _isSyncActive = await _platform.configure(baseUrl: _config!.baseUrl, customSyncUrl: customSyncUrl);
 
     // Try to restore existing session from Keychain
     final restoredUserId = await _platform.restoreSession();
@@ -210,13 +207,9 @@ class HealthBgSync {
   /// Returns true if authorization was successful, false otherwise.
   ///
   /// Throws [NotSignedInException] if no user is signed in.
-  static Future<bool> requestAuthorization({
-    required List<HealthDataType> types,
-  }) async {
+  static Future<bool> requestAuthorization({required List<HealthDataType> types}) async {
     _ensureSignedIn();
-    return _platform.requestAuthorization(
-      types: types.map((e) => e.id).toList(growable: false),
-    );
+    return _platform.requestAuthorization(types: types.map((e) => e.id).toList(growable: false));
   }
 
   // MARK: - Sync Operations
@@ -277,6 +270,61 @@ class HealthBgSync {
   /// String values may be null if not stored. isSyncActive is a bool.
   static Future<Map<String, dynamic>> getStoredCredentials() async {
     return _platform.getStoredCredentials();
+  }
+
+  // MARK: - Sync Session Management
+
+  /// Returns the current sync session status.
+  ///
+  /// Use this to check if there's an interrupted sync that can be resumed.
+  /// The sync will automatically resume on app restart, but you can also
+  /// manually trigger resume with [resumeSync].
+  ///
+  /// Returns a map with:
+  /// - `hasResumableSession`: bool - whether there's an interrupted sync
+  /// - `sentCount`: int - number of records already sent in this session
+  /// - `isFullExport`: bool - whether this is a full export or incremental
+  /// - `createdAt`: String? - ISO8601 timestamp when sync started
+  ///
+  /// ```dart
+  /// final status = await HealthBgSync.getSyncStatus();
+  /// if (status['hasResumableSession'] == true) {
+  ///   print('Sync interrupted, ${status['sentCount']} records already sent');
+  /// }
+  /// ```
+  static Future<Map<String, dynamic>> getSyncStatus() async {
+    return _platform.getSyncStatus();
+  }
+
+  /// Manually resumes an interrupted sync session.
+  ///
+  /// The sync is automatically resumed on app restart when [configure] is
+  /// called. Use this method if you want to manually trigger resume, for
+  /// example after network connectivity is restored.
+  ///
+  /// Throws [NotSignedInException] if no user is signed in.
+  /// Throws [PlatformException] if there's no resumable session.
+  ///
+  /// ```dart
+  /// final status = await HealthBgSync.getSyncStatus();
+  /// if (status['hasResumableSession'] == true) {
+  ///   await HealthBgSync.resumeSync();
+  /// }
+  /// ```
+  static Future<void> resumeSync() async {
+    _ensureSignedIn();
+    await _platform.resumeSync();
+  }
+
+  /// Clears any interrupted sync session without resuming.
+  ///
+  /// Use this if you want to discard an interrupted sync and start fresh.
+  /// This will NOT reset the sync anchors - the next sync will be incremental
+  /// from where the last successful sync completed.
+  ///
+  /// To fully reset and re-export all data, use [resetAnchors] instead.
+  static Future<void> clearSyncSession() async {
+    await _platform.clearSyncSession();
   }
 
   // MARK: - Helpers

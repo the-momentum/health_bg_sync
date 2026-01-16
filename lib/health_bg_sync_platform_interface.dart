@@ -87,6 +87,31 @@ abstract class HealthBgSyncPlatform extends PlatformInterface {
       'getStoredCredentials() has not been implemented.',
     );
   }
+
+  /// Returns the current sync session status.
+  ///
+  /// Returns a map with:
+  /// - hasResumableSession: bool - whether there's an interrupted sync to resume
+  /// - sentCount: int - number of records already sent in this session
+  /// - isFullExport: bool - whether this is a full export or incremental sync
+  /// - createdAt: String? - ISO8601 timestamp when the sync session started
+  Future<Map<String, dynamic>> getSyncStatus() {
+    throw UnimplementedError('getSyncStatus() has not been implemented.');
+  }
+
+  /// Manually resumes an interrupted sync session.
+  ///
+  /// Throws if there's no resumable session.
+  Future<void> resumeSync() {
+    throw UnimplementedError('resumeSync() has not been implemented.');
+  }
+
+  /// Clears any interrupted sync session without resuming.
+  ///
+  /// Use this if you want to discard an interrupted sync and start fresh.
+  Future<void> clearSyncSession() {
+    throw UnimplementedError('clearSyncSession() has not been implemented.');
+  }
 }
 
 /// NO-OP placeholder.
