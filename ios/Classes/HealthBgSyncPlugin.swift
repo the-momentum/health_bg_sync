@@ -554,6 +554,8 @@ import Network
         collectAllData(fullExport: fullExport, isBackground: false, completion: completion)
     }
     
+    /// Streaming data collection - processes one type at a time, chunk by chunk
+    /// This prevents loading all data into memory at once
     internal func collectAllData(fullExport: Bool, isBackground: Bool, completion: @escaping ()->Void) {
         syncLock.lock()
         if isSyncing {
@@ -567,209 +569,344 @@ import Network
         
         guard HKHealthStore.isHealthDataAvailable() else {
             logMessage("❌ HealthKit not available")
-            syncLock.lock()
-            isSyncing = false
-            isInitialSyncInProgress = false
-            syncLock.unlock()
+            finishSync()
+            completion()
+            return
+        }
+        
+        guard let token = self.accessToken, let endpoint = self.syncEndpoint else {
+            logMessage("❌ No token or endpoint")
+            finishSync()
+            completion()
+            return
+        }
+        
+        let queryableTypes = getQueryableTypes()
+        guard !queryableTypes.isEmpty else {
+            logMessage("❌ No queryable types")
+            finishSync()
             completion()
             return
         }
         
         // Check if we're resuming an interrupted sync
         let existingState = loadSyncState()
-        let isResuming = existingState != nil && !existingState!.sentUUIDs.isEmpty
+        let isResuming = existingState != nil && existingState!.hasProgress
         
         if isResuming {
-            logMessage("🔄 Resuming interrupted sync (\(existingState!.sentUUIDs.count) already sent)")
+            logMessage("🔄 Resuming sync (\(existingState!.totalSentCount) already sent, \(existingState!.completedTypes.count) types done)")
         } else {
-            logMessage("🔄 Collecting data (fullExport: \(fullExport))")
+            logMessage("🔄 Starting streaming sync (fullExport: \(fullExport), \(queryableTypes.count) types)")
+            _ = startNewSyncState(fullExport: fullExport, types: queryableTypes)
         }
         
-        let queryableTypes = getQueryableTypes()
+        // Get starting index for resume
+        let startIndex = isResuming ? getResumeTypeIndex() : 0
         
-        let allSamples = NSMutableArray()
-        let allAnchors = NSMutableDictionary()
-        let group = DispatchGroup()
-        let lock = NSLock()
-        
-        for type in queryableTypes {
-            group.enter()
-            let anchor = fullExport ? nil : loadAnchor(for: type)
-            
-            let query = HKAnchoredObjectQuery(type: type, predicate: nil, anchor: anchor, limit: HKObjectQueryNoLimit) {
-                [weak self] _, samplesOrNil, deletedObjects, newAnchor, error in
-                guard let self = self else { 
-                    group.leave()
-                    return 
-                }
-                
-                if let error = error {
-                    self.logMessage("❌ \(self.shortTypeName(type.identifier)): \(error.localizedDescription)")
-                    group.leave()
-                    return 
-                }
-                
-                let samples = samplesOrNil ?? []
-                if samples.count > 0 {
-                    self.logMessage("  \(self.shortTypeName(type.identifier)): \(samples.count)")
-                }
-                
-                lock.lock()
-                allSamples.addObjects(from: samples)
-                if let newAnchor = newAnchor {
-                    allAnchors[type.identifier] = newAnchor
-                }
-                lock.unlock()
-                group.leave()
-            }
-            
-            healthStore.execute(query)
-        }
-        
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { 
-                completion()
-                return 
-            }
-            
-            var samples = allSamples.compactMap { $0 as? HKSample }
-            logMessage("📊 Total from HealthKit: \(samples.count) samples")
-            
-            // Filter out already sent samples if resuming
-            samples = self.filterSentSamples(samples)
-            
-            guard samples.count > 0 else { 
-                self.logMessage("ℹ️ No new samples to send")
-                // If we were resuming, finalize the sync
-                if isResuming {
-                    self.finalizeSyncState()
-                }
-                self.syncLock.lock()
-                self.isSyncing = false
-                self.isInitialSyncInProgress = false
-                self.syncLock.unlock()
-                completion()
-                return 
-            }
-            
-            guard let token = self.accessToken, let endpoint = self.syncEndpoint else { 
-                self.logMessage("❌ No token or endpoint")
-                self.syncLock.lock()
-                self.isSyncing = false
-                self.isInitialSyncInProgress = false
-                self.syncLock.unlock()
-                completion()
-                return 
-            }
-            
-            var anchors: [String: HKQueryAnchor] = [:]
-            for (key, value) in allAnchors {
-                if let keyString = key as? String, let anchor = value as? HKQueryAnchor {
-                    anchors[keyString] = anchor
-                }
-            }
-            
-            // Start sync state if not resuming
-            if !isResuming {
-                _ = self.startNewSyncState(fullExport: fullExport, anchors: anchors)
-            }
-            
-            let chunks = samples.chunked(into: self.recordsPerChunk)
-            if chunks.count > 1 {
-                self.logMessage("📦 Splitting into \(chunks.count) chunks")
-            }
-            
-            if chunks.isEmpty {
-                self.finalizeSyncState()
-                self.syncLock.lock()
-                self.isSyncing = false
-                self.isInitialSyncInProgress = false
-                self.syncLock.unlock()
-                completion()
-                return
-            }
-            
-            self.sendChunksWithResume(
-                chunks: chunks,
-                anchors: anchors,
-                endpoint: endpoint,
-                token: token,
-                fullExport: fullExport,
-                chunkIndex: 0,
-                totalChunks: chunks.count
-            ) {
-                self.syncLock.lock()
-                self.isSyncing = false
-                self.isInitialSyncInProgress = false
-                self.syncLock.unlock()
-                completion()
-            }
+        // Process types sequentially, streaming chunks
+        processTypesSequentially(
+            types: queryableTypes,
+            typeIndex: startIndex,
+            fullExport: fullExport,
+            endpoint: endpoint,
+            token: token,
+            isBackground: isBackground
+        ) { [weak self] in
+            self?.finalizeSyncState()
+            self?.finishSync()
+            completion()
         }
     }
     
-    // MARK: - Send Chunks with UUID Tracking
-    internal func sendChunksWithResume(
-        chunks: [[HKSample]],
-        anchors: [String: HKQueryAnchor],
+    /// Process types one by one - streaming approach
+    private func processTypesSequentially(
+        types: [HKSampleType],
+        typeIndex: Int,
+        fullExport: Bool,
         endpoint: URL,
         token: String,
-        fullExport: Bool,
-        chunkIndex: Int,
-        totalChunks: Int,
+        isBackground: Bool,
         completion: @escaping ()->Void
     ) {
-        guard chunkIndex < chunks.count else {
-            // All done - finalize
-            finalizeSyncState()
+        guard typeIndex < types.count else {
+            // All types processed
             completion()
             return
         }
         
-        let chunk = chunks[chunkIndex]
-        let isLastChunk = (chunkIndex == chunks.count - 1)
+        let type = types[typeIndex]
         
-        // Count records and workouts in this chunk
-        let workoutsCount = chunk.filter { $0 is HKWorkout }.count
-        let recordsCount = chunk.count - workoutsCount
-        var chunkDesc = "📤 Chunk \(chunkIndex + 1)/\(totalChunks): \(chunk.count) samples"
-        if workoutsCount > 0 && recordsCount > 0 {
-            chunkDesc += " (\(recordsCount) records, \(workoutsCount) workouts)"
-        } else if workoutsCount > 0 {
-            chunkDesc += " (\(workoutsCount) workouts)"
+        // Skip already completed types
+        if !shouldSyncType(type.identifier) {
+            logMessage("⏭️ Skipping \(shortTypeName(type.identifier)) - already synced")
+            processTypesSequentially(
+                types: types,
+                typeIndex: typeIndex + 1,
+                fullExport: fullExport,
+                endpoint: endpoint,
+                token: token,
+                isBackground: isBackground,
+                completion: completion
+            )
+            return
         }
-        logMessage(chunkDesc)
         
-        let payload = self.serializeCombined(samples: chunk, anchors: isLastChunk ? anchors : [:])
+        // Update current type index for resume
+        updateCurrentTypeIndex(typeIndex)
         
-        // Extract UUIDs for this chunk
-        let chunkUUIDs = chunk.map { $0.uuid.uuidString }
-        
-        self.enqueueCombinedUpload(payload: payload, anchors: isLastChunk ? anchors : [:], endpoint: endpoint, token: token, wasFullExport: fullExport && isLastChunk) { [weak self] success in
+        // Process this type with streaming chunks
+        processTypeStreaming(
+            type: type,
+            fullExport: fullExport,
+            endpoint: endpoint,
+            token: token,
+            chunkLimit: isBackground ? backgroundChunkSize : recordsPerChunk
+        ) { [weak self] success in
             guard let self = self else {
                 completion()
                 return
             }
             
             if success {
-                // Mark these UUIDs as sent
-                self.addSentUUIDs(chunkUUIDs)
-                
-                // Continue to next chunk
-                self.sendChunksWithResume(
-                    chunks: chunks,
-                    anchors: anchors,
+                // Continue to next type
+                self.processTypesSequentially(
+                    types: types,
+                    typeIndex: typeIndex + 1,
+                    fullExport: fullExport,
                     endpoint: endpoint,
                     token: token,
-                    fullExport: fullExport,
-                    chunkIndex: chunkIndex + 1,
-                    totalChunks: totalChunks,
+                    isBackground: isBackground,
                     completion: completion
                 )
             } else {
-                self.logMessage("❌ Chunk \(chunkIndex + 1) failed, will resume later")
+                // Failed - will resume from this type later
+                self.logMessage("⚠️ Sync paused at \(self.shortTypeName(type.identifier)), will resume later")
+                self.finishSync()
                 completion()
             }
         }
+    }
+    
+    /// Process a single type with streaming - fetches and sends chunks without accumulating
+    private func processTypeStreaming(
+        type: HKSampleType,
+        fullExport: Bool,
+        endpoint: URL,
+        token: String,
+        chunkLimit: Int,
+        completion: @escaping (Bool)->Void
+    ) {
+        let anchor = fullExport ? nil : loadAnchor(for: type)
+        
+        logMessage("📊 \(shortTypeName(type.identifier)): querying...")
+        
+        // Use limit to fetch only a chunk at a time
+        let query = HKAnchoredObjectQuery(type: type, predicate: nil, anchor: anchor, limit: chunkLimit) {
+            [weak self] _, samplesOrNil, deletedObjects, newAnchor, error in
+            
+            // Use autoreleasepool to free memory after processing
+            autoreleasepool {
+                guard let self = self else {
+                    completion(false)
+                    return
+                }
+                
+                if let error = error {
+                    self.logMessage("❌ \(self.shortTypeName(type.identifier)): \(error.localizedDescription)")
+                    completion(false)
+                    return
+                }
+                
+                let samples = samplesOrNil ?? []
+                
+                if samples.isEmpty {
+                    // No more data for this type
+                    self.logMessage("  \(self.shortTypeName(type.identifier)): ✓ complete")
+                    // Mark type as complete (no anchor to save if no samples)
+                    self.updateTypeProgress(typeIdentifier: type.identifier, sentInChunk: 0, isComplete: true, anchorData: nil)
+                    completion(true)
+                    return
+                }
+                
+                self.logMessage("  \(self.shortTypeName(type.identifier)): \(samples.count) samples")
+                
+                // Serialize immediately within autoreleasepool
+                let payload = self.serializeCombinedStreaming(samples: samples)
+                
+                // Prepare anchor data
+                var anchorData: Data? = nil
+                if let newAnchor = newAnchor {
+                    anchorData = try? NSKeyedArchiver.archivedData(withRootObject: newAnchor, requiringSecureCoding: true)
+                }
+                
+                // Check if this is the last chunk for this type
+                let isLastChunk = samples.count < chunkLimit
+                
+                // Send immediately
+                self.sendChunkStreaming(
+                    payload: payload,
+                    typeIdentifier: type.identifier,
+                    sampleCount: samples.count,
+                    anchorData: anchorData,
+                    isLastChunk: isLastChunk,
+                    endpoint: endpoint,
+                    token: token
+                ) { [weak self] success in
+                    guard let self = self else {
+                        completion(false)
+                        return
+                    }
+                    
+                    if success {
+                        if isLastChunk {
+                            // Type fully synced
+                            completion(true)
+                        } else {
+                            // More chunks to fetch - continue with updated anchor
+                            self.processTypeStreamingContinue(
+                                type: type,
+                                anchor: newAnchor,
+                                endpoint: endpoint,
+                                token: token,
+                                chunkLimit: chunkLimit,
+                                completion: completion
+                            )
+                        }
+                    } else {
+                        // Upload failed
+                        completion(false)
+                    }
+                }
+            }
+        }
+        
+        healthStore.execute(query)
+    }
+    
+    /// Continue streaming for a type (subsequent chunks)
+    private func processTypeStreamingContinue(
+        type: HKSampleType,
+        anchor: HKQueryAnchor?,
+        endpoint: URL,
+        token: String,
+        chunkLimit: Int,
+        completion: @escaping (Bool)->Void
+    ) {
+        let query = HKAnchoredObjectQuery(type: type, predicate: nil, anchor: anchor, limit: chunkLimit) {
+            [weak self] _, samplesOrNil, deletedObjects, newAnchor, error in
+            
+            autoreleasepool {
+                guard let self = self else {
+                    completion(false)
+                    return
+                }
+                
+                if let error = error {
+                    self.logMessage("❌ \(self.shortTypeName(type.identifier)): \(error.localizedDescription)")
+                    completion(false)
+                    return
+                }
+                
+                let samples = samplesOrNil ?? []
+                
+                if samples.isEmpty {
+                    // No more data
+                    self.updateTypeProgress(typeIdentifier: type.identifier, sentInChunk: 0, isComplete: true, anchorData: nil)
+                    completion(true)
+                    return
+                }
+                
+                self.logMessage("  \(self.shortTypeName(type.identifier)): +\(samples.count) samples")
+                
+                let payload = self.serializeCombinedStreaming(samples: samples)
+                
+                var anchorData: Data? = nil
+                if let newAnchor = newAnchor {
+                    anchorData = try? NSKeyedArchiver.archivedData(withRootObject: newAnchor, requiringSecureCoding: true)
+                }
+                
+                let isLastChunk = samples.count < chunkLimit
+                
+                self.sendChunkStreaming(
+                    payload: payload,
+                    typeIdentifier: type.identifier,
+                    sampleCount: samples.count,
+                    anchorData: anchorData,
+                    isLastChunk: isLastChunk,
+                    endpoint: endpoint,
+                    token: token
+                ) { [weak self] success in
+                    guard let self = self else {
+                        completion(false)
+                        return
+                    }
+                    
+                    if success {
+                        if isLastChunk {
+                            completion(true)
+                        } else {
+                            self.processTypeStreamingContinue(
+                                type: type,
+                                anchor: newAnchor,
+                                endpoint: endpoint,
+                                token: token,
+                                chunkLimit: chunkLimit,
+                                completion: completion
+                            )
+                        }
+                    } else {
+                        completion(false)
+                    }
+                }
+            }
+        }
+        
+        healthStore.execute(query)
+    }
+    
+    /// Send a single chunk and update progress
+    private func sendChunkStreaming(
+        payload: [String: Any],
+        typeIdentifier: String,
+        sampleCount: Int,
+        anchorData: Data?,
+        isLastChunk: Bool,
+        endpoint: URL,
+        token: String,
+        completion: @escaping (Bool)->Void
+    ) {
+        enqueueCombinedUpload(
+            payload: payload,
+            anchors: [:],  // We handle anchors separately now
+            endpoint: endpoint,
+            token: token,
+            wasFullExport: false
+        ) { [weak self] success in
+            guard let self = self else {
+                completion(false)
+                return
+            }
+            
+            if success {
+                // Update progress
+                self.updateTypeProgress(
+                    typeIdentifier: typeIdentifier,
+                    sentInChunk: sampleCount,
+                    isComplete: isLastChunk,
+                    anchorData: isLastChunk ? anchorData : nil
+                )
+            }
+            
+            completion(success)
+        }
+    }
+    
+    /// Helper to finish sync state
+    private func finishSync() {
+        syncLock.lock()
+        isSyncing = false
+        isInitialSyncInProgress = false
+        syncLock.unlock()
     }
     
     internal func syncType(_ type: HKSampleType, fullExport: Bool, completion: @escaping ()->Void) {

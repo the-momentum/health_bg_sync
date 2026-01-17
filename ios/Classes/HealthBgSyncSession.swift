@@ -1,15 +1,38 @@
 import Foundation
 import HealthKit
 
-/// Lightweight sync state - stores only sent UUIDs, not the actual data
+/// Progress tracking per data type - memory efficient
+struct TypeSyncProgress: Codable {
+    let typeIdentifier: String
+    var sentCount: Int
+    var isComplete: Bool
+    /// Anchor data to save after type is fully synced
+    var pendingAnchorData: Data?
+}
+
+/// Lightweight sync state - tracks progress per type instead of all UUIDs
 struct SyncState: Codable {
     let userKey: String
     let fullExport: Bool
-    var sentUUIDs: Set<String>
     let createdAt: Date
     
-    /// Anchors data (serialized) to save after all data is sent
-    var anchorsData: [String: Data]?
+    /// Progress per type - much more memory efficient than storing all UUIDs
+    var typeProgress: [String: TypeSyncProgress]
+    
+    /// Total samples sent across all types
+    var totalSentCount: Int
+    
+    /// Types that have been fully processed
+    var completedTypes: Set<String>
+    
+    /// Index of current type being processed (for resume)
+    var currentTypeIndex: Int
+    
+    // MARK: - Computed properties
+    
+    var hasProgress: Bool {
+        return totalSentCount > 0 || !completedTypes.isEmpty
+    }
 }
 
 extension HealthBgSyncPlugin {
@@ -58,9 +81,41 @@ extension HealthBgSyncPlugin {
         return state
     }
     
-    internal func addSentUUIDs(_ uuids: [String]) {
+    /// Update progress for a specific type after sending a chunk
+    internal func updateTypeProgress(typeIdentifier: String, sentInChunk: Int, isComplete: Bool, anchorData: Data?) {
         guard var state = loadSyncState() else { return }
-        state.sentUUIDs.formUnion(uuids)
+        
+        var progress = state.typeProgress[typeIdentifier] ?? TypeSyncProgress(
+            typeIdentifier: typeIdentifier,
+            sentCount: 0,
+            isComplete: false,
+            pendingAnchorData: nil
+        )
+        
+        progress.sentCount += sentInChunk
+        progress.isComplete = isComplete
+        if let anchorData = anchorData {
+            progress.pendingAnchorData = anchorData
+        }
+        
+        state.typeProgress[typeIdentifier] = progress
+        state.totalSentCount += sentInChunk
+        
+        if isComplete {
+            state.completedTypes.insert(typeIdentifier)
+            // Save anchor immediately when type is complete
+            if let anchorData = progress.pendingAnchorData {
+                saveAnchorData(anchorData, typeIdentifier: typeIdentifier, userKey: state.userKey)
+            }
+        }
+        
+        saveSyncState(state)
+    }
+    
+    /// Mark current type index for resume
+    internal func updateCurrentTypeIndex(_ index: Int) {
+        guard var state = loadSyncState() else { return }
+        state.currentTypeIndex = index
         saveSyncState(state)
     }
     
@@ -72,47 +127,25 @@ extension HealthBgSyncPlugin {
     
     // MARK: - Start New Sync State
     
-    internal func startNewSyncState(fullExport: Bool, anchors: [String: HKQueryAnchor]) -> SyncState {
-        // Save anchors to file
-        var anchorsData: [String: Data] = [:]
-        for (typeId, anchor) in anchors {
-            if let data = try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true) {
-                anchorsData[typeId] = data
-            }
-        }
-        
-        if !anchorsData.isEmpty {
-            if let serializedData = try? NSKeyedArchiver.archivedData(withRootObject: anchorsData, requiringSecureCoding: true) {
-                ensureSyncStateDir()
-                try? serializedData.write(to: anchorsFilePath(), options: .atomic)
-            }
-        }
-        
+    internal func startNewSyncState(fullExport: Bool, types: [HKSampleType]) -> SyncState {
         let state = SyncState(
             userKey: userKey(),
             fullExport: fullExport,
-            sentUUIDs: [],
             createdAt: Date(),
-            anchorsData: nil
+            typeProgress: [:],
+            totalSentCount: 0,
+            completedTypes: [],
+            currentTypeIndex: 0
         )
         
         saveSyncState(state)
         return state
     }
     
-    // MARK: - Finalize Sync (save anchors)
+    // MARK: - Finalize Sync (mark complete)
     
     internal func finalizeSyncState() {
         guard let state = loadSyncState() else { return }
-        
-        // Load and save anchors
-        if let anchorData = try? Data(contentsOf: anchorsFilePath()),
-           let anchorsDict = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSDictionary.self, NSString.self, NSData.self], from: anchorData) as? [String: Data] {
-            for (typeId, data) in anchorsDict {
-                saveAnchorData(data, typeIdentifier: typeId, userKey: state.userKey)
-            }
-            logMessage("✅ Saved anchors for \(anchorsDict.count) types")
-        }
         
         // Mark full export as complete if needed
         if state.fullExport {
@@ -122,6 +155,8 @@ extension HealthBgSyncPlugin {
             logMessage("✅ Marked full export complete")
         }
         
+        logMessage("✅ Sync complete: \(state.totalSentCount) samples across \(state.completedTypes.count) types")
+        
         // Clear state
         clearSyncSession()
     }
@@ -130,25 +165,19 @@ extension HealthBgSyncPlugin {
     
     internal func hasResumableSyncSession() -> Bool {
         guard let state = loadSyncState() else { return false }
-        return !state.sentUUIDs.isEmpty
+        return state.hasProgress
     }
     
-    // MARK: - Filter Already Sent Samples
+    /// Check if a specific type needs to be synced (not yet completed)
+    internal func shouldSyncType(_ typeIdentifier: String) -> Bool {
+        guard let state = loadSyncState() else { return true }
+        return !state.completedTypes.contains(typeIdentifier)
+    }
     
-    internal func filterSentSamples(_ samples: [HKSample]) -> [HKSample] {
-        guard let state = loadSyncState() else { return samples }
-        
-        let sentUUIDs = state.sentUUIDs
-        if sentUUIDs.isEmpty { return samples }
-        
-        let filtered = samples.filter { !sentUUIDs.contains($0.uuid.uuidString) }
-        let skipped = samples.count - filtered.count
-        
-        if skipped > 0 {
-            logMessage("⏭️ Skipping \(skipped) already sent samples")
-        }
-        
-        return filtered
+    /// Get the starting type index for resume
+    internal func getResumeTypeIndex() -> Int {
+        guard let state = loadSyncState() else { return 0 }
+        return state.currentTypeIndex
     }
     
     // MARK: - Get Sync Status for Flutter
@@ -156,8 +185,9 @@ extension HealthBgSyncPlugin {
     internal func getSyncStatusDict() -> [String: Any] {
         if let state = loadSyncState() {
             return [
-                "hasResumableSession": !state.sentUUIDs.isEmpty,
-                "sentCount": state.sentUUIDs.count,
+                "hasResumableSession": state.hasProgress,
+                "sentCount": state.totalSentCount,
+                "completedTypes": state.completedTypes.count,
                 "isFullExport": state.fullExport,
                 "createdAt": ISO8601DateFormatter().string(from: state.createdAt)
             ]
@@ -165,13 +195,14 @@ extension HealthBgSyncPlugin {
             return [
                 "hasResumableSession": false,
                 "sentCount": 0,
+                "completedTypes": 0,
                 "isFullExport": false,
                 "createdAt": NSNull()
             ]
         }
     }
     
-    // MARK: - Legacy compatibility (for old session files)
+    // MARK: - Legacy compatibility
     
     internal func loadSyncSession() -> SyncState? {
         return loadSyncState()
