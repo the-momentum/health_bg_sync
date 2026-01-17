@@ -45,7 +45,56 @@ extension HealthBgSyncPlugin {
         ]
     }
     
-    // MARK: - Combined serialization for all data types
+    // MARK: - Memory-efficient streaming serialization
+    /// Serializes samples with autoreleasepool to prevent memory buildup
+    internal func serializeCombinedStreaming(samples: [HKSample]) -> [String: Any] {
+        var workouts: [[String: Any]] = []
+        var records: [[String: Any]] = []
+        
+        // Reuse date formatter to avoid repeated allocations
+        let dateFormatter = ISO8601DateFormatter()
+        
+        // Process in batches with autoreleasepool to release intermediate objects
+        let batchSize = 100
+        for batchStart in stride(from: 0, to: samples.count, by: batchSize) {
+            autoreleasepool {
+                let batchEnd = min(batchStart + batchSize, samples.count)
+                let batch = samples[batchStart..<batchEnd]
+                
+                for s in batch {
+                    if let w = s as? HKWorkout {
+                        workouts.append(_mapWorkoutEfficient(w, dateFormatter: dateFormatter))
+                    } else if let q = s as? HKQuantitySample {
+                        records.append(_mapQuantityEfficient(q, dateFormatter: dateFormatter))
+                    } else if let c = s as? HKCategorySample {
+                        records.append(_mapCategoryEfficient(c, dateFormatter: dateFormatter))
+                    } else if let corr = s as? HKCorrelation {
+                        records.append(contentsOf: _mapCorrelationEfficient(corr, dateFormatter: dateFormatter))
+                    } else {
+                        records.append([
+                            "uuid": s.uuid.uuidString,
+                            "type": s.sampleType.identifier,
+                            "value": NSNull(),
+                            "unit": NSNull(),
+                            "startDate": dateFormatter.string(from: s.startDate),
+                            "endDate": dateFormatter.string(from: s.endDate),
+                            "sourceName": s.sourceRevision.source.name,
+                            "recordMetadata": _metadataList(s.metadata)
+                        ])
+                    }
+                }
+            }
+        }
+        
+        return [
+            "data": [
+                "workouts": workouts,
+                "records": records
+            ]
+        ]
+    }
+    
+    // MARK: - Combined serialization for all data types (legacy)
     internal func serializeCombined(samples: [HKSample], anchors: [String: HKQueryAnchor]) -> [String: Any] {
         var workouts: [[String: Any]] = []
         var records: [[String: Any]] = []
@@ -608,5 +657,162 @@ extension HealthBgSyncPlugin {
             ])
         }
         return list
+    }
+    
+    // MARK: - Memory-efficient mappers (reuse date formatter)
+    
+    private func _mapQuantityEfficient(_ q: HKQuantitySample, dateFormatter: ISO8601DateFormatter) -> [String: Any] {
+        let (unit, unitOut) = _defaultUnit(for: q.quantityType)
+        
+        let value: Double
+        let finalUnit: String
+        
+        if q.quantity.is(compatibleWith: unit) {
+            value = q.quantity.doubleValue(for: unit)
+            finalUnit = unitOut
+        } else {
+            let fallbackUnit = _getFallbackUnit(for: q.quantityType)
+            value = q.quantity.doubleValue(for: fallbackUnit)
+            finalUnit = fallbackUnit.unitString
+        }
+
+        return [
+            "uuid": q.uuid.uuidString,
+            "type": q.quantityType.identifier,
+            "value": value,
+            "unit": finalUnit,
+            "startDate": dateFormatter.string(from: q.startDate),
+            "endDate": dateFormatter.string(from: q.endDate),
+            "sourceName": q.sourceRevision.source.name,
+            "recordMetadata": _metadataList(q.metadata)
+        ]
+    }
+
+    private func _mapCategoryEfficient(_ c: HKCategorySample, dateFormatter: ISO8601DateFormatter) -> [String: Any] {
+        return [
+            "uuid": c.uuid.uuidString,
+            "type": c.categoryType.identifier,
+            "value": c.value,
+            "unit": NSNull(),
+            "startDate": dateFormatter.string(from: c.startDate),
+            "endDate": dateFormatter.string(from: c.endDate),
+            "sourceName": c.sourceRevision.source.name,
+            "recordMetadata": _metadataList(c.metadata)
+        ]
+    }
+
+    private func _mapCorrelationEfficient(_ corr: HKCorrelation, dateFormatter: ISO8601DateFormatter) -> [[String: Any]] {
+        var records: [[String: Any]] = []
+        let src = corr.sourceRevision.source.name
+
+        for sample in corr.objects {
+            if let q = sample as? HKQuantitySample {
+                let (unit, unitOut) = _defaultUnit(for: q.quantityType)
+                let value = q.quantity.doubleValue(for: unit)
+                records.append([
+                    "uuid": q.uuid.uuidString,
+                    "type": q.quantityType.identifier,
+                    "value": value,
+                    "unit": unitOut,
+                    "startDate": dateFormatter.string(from: q.startDate),
+                    "endDate": dateFormatter.string(from: q.endDate),
+                    "sourceName": src,
+                    "recordMetadata": _metadataList(q.metadata)
+                ])
+            }
+        }
+        return records
+    }
+
+    private func _mapWorkoutEfficient(_ w: HKWorkout, dateFormatter: ISO8601DateFormatter) -> [String: Any] {
+        var stats: [[String: Any]] = []
+        
+        stats.append([
+            "type": "duration",
+            "value": w.duration,
+            "unit": "s"
+        ])
+        
+        if #available(iOS 16.0, *) {
+            if let energyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+               let energyStats = w.statistics(for: energyType),
+               let sum = energyStats.sumQuantity() {
+                stats.append([
+                    "type": "activeEnergyBurned",
+                    "value": sum.doubleValue(for: .kilocalorie()),
+                    "unit": "kcal"
+                ])
+            }
+            
+            let distanceTypes: [HKQuantityTypeIdentifier] = [
+                .distanceWalkingRunning,
+                .distanceCycling,
+                .distanceSwimming,
+                .distanceDownhillSnowSports
+            ]
+            for distanceTypeId in distanceTypes {
+                if let distType = HKQuantityType.quantityType(forIdentifier: distanceTypeId),
+                   let distStats = w.statistics(for: distType),
+                   let sum = distStats.sumQuantity() {
+                    stats.append([
+                        "type": "distance",
+                        "value": sum.doubleValue(for: .meter()),
+                        "unit": "m"
+                    ])
+                    break
+                }
+            }
+            
+            if let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate),
+               let hrStats = w.statistics(for: hrType) {
+                if let avg = hrStats.averageQuantity() {
+                    stats.append([
+                        "type": "averageHeartRate",
+                        "value": avg.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
+                        "unit": "bpm"
+                    ])
+                }
+                if let max = hrStats.maximumQuantity() {
+                    stats.append([
+                        "type": "maxHeartRate",
+                        "value": max.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
+                        "unit": "bpm"
+                    ])
+                }
+            }
+            
+            if let elevationAscended = w.metadata?[HKMetadataKeyElevationAscended] as? HKQuantity {
+                stats.append([
+                    "type": "elevationGain",
+                    "value": elevationAscended.doubleValue(for: .meter()),
+                    "unit": "m"
+                ])
+            }
+            
+        } else {
+            if let energy = w.totalEnergyBurned {
+                stats.append([
+                    "type": "activeEnergyBurned",
+                    "value": energy.doubleValue(for: .kilocalorie()),
+                    "unit": "kcal"
+                ])
+            }
+            if let dist = w.totalDistance {
+                stats.append([
+                    "type": "distance",
+                    "value": dist.doubleValue(for: .meter()),
+                    "unit": "m"
+                ])
+            }
+        }
+
+        return [
+            "uuid": w.uuid.uuidString,
+            "type": _workoutTypeString(w.workoutActivityType),
+            "startDate": dateFormatter.string(from: w.startDate),
+            "endDate": dateFormatter.string(from: w.endDate),
+            "sourceName": w.sourceRevision.source.name,
+            "workoutStatistics": stats
+        ]
     }
 }
